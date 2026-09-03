@@ -21,6 +21,11 @@ RUN mkdir -p /run/nginx && chown nginx:nginx /run/nginx
 COPY deploy/nginx.conf /etc/nginx/nginx.conf
 COPY public/ /srv/ipgeo/
 
+# A bad config fails the build rather than the deploy. It is not something a
+# test can check — a config file is only wrong to nginx — and the failure it
+# catches is total: the container never serves a byte and restart-loops.
+RUN nginx -t
+
 # Readable by nginx, writable by nobody. The whole point of this container is
 # that it has nothing to write.
 RUN chown -R root:root /srv/ipgeo && chmod -R a-w,a+rX /srv/ipgeo

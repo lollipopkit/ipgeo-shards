@@ -321,6 +321,15 @@ def main() -> None:
             ),
         },
     }
+    # The query page, copied rather than generated: it is a static file with
+    # no build step, and it is the clearest statement of the protocol there is
+    # — the whole client is forty lines of JavaScript in it.
+    web = Path(__file__).resolve().parent.parent / "web"
+    for page in sorted(web.glob("*")):
+        if page.is_file():
+            shutil.copy2(page, args.out / page.name)
+            print(f"  copied {page.name}")
+
     index_out = args.out / "v1" / "index.json"
     index_out.write_text(
         json.dumps(index, indent=2, sort_keys=True, ensure_ascii=False) + "\n"

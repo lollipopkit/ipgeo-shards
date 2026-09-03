@@ -1,0 +1,201 @@
+<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ipgeo-shards</title>
+<meta name="description" content="Look up an IPv4 address against the static shards this endpoint serves.">
+<!--
+  A page that does exactly what a client does: read the index, fetch the one
+  shard the address falls in, and binary-search it here.
+
+  It exists for two reasons. It is a way to check the endpoint by hand without
+  writing a script — which is how the deployment was verified — and it is the
+  clearest possible statement of what the protocol is, since the whole client
+  is forty lines of it below.
+
+  No dependencies and no build step: it is copied into `public/` by
+  `src/build.py` and served as a file like everything else here. Nothing is
+  sent anywhere. The address you type stays in this tab; the *shard* is what
+  is requested, and it covers 16.7 million addresses.
+-->
+<style>
+  :root { color-scheme: light dark; --fg: #111; --dim: #666; --line: #d8d8d8; --acc: #0b5; }
+  @media (prefers-color-scheme: dark) {
+    :root { --fg: #e8e8e8; --dim: #999; --line: #333; --acc: #3d8; }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0 auto; padding: 2rem 1.25rem 4rem; max-width: 46rem;
+    font: 15px/1.6 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+    color: var(--fg);
+  }
+  h1 { font-size: 1.35rem; margin: 0 0 .25rem; }
+  .sub { color: var(--dim); margin: 0 0 2rem; }
+  form { display: flex; gap: .5rem; margin-bottom: 1.5rem; }
+  input {
+    flex: 1; padding: .6rem .75rem; font: inherit; font-variant-numeric: tabular-nums;
+    border: 1px solid var(--line); border-radius: .5rem; background: transparent; color: inherit;
+  }
+  input:focus { outline: 2px solid var(--acc); outline-offset: 1px; border-color: transparent; }
+  button {
+    padding: .6rem 1.1rem; font: inherit; cursor: pointer;
+    border: 1px solid var(--line); border-radius: .5rem; background: transparent; color: inherit;
+  }
+  button:hover { border-color: var(--acc); }
+  #out { min-height: 6rem; }
+  .coord { font-size: 1.6rem; font-variant-numeric: tabular-nums; margin: 0 0 .35rem; }
+  .note, .err { color: var(--dim); }
+  .err { color: #c33; }
+  dl { display: grid; grid-template-columns: max-content 1fr; gap: .15rem 1rem; margin: 1.25rem 0 0; }
+  dt { color: var(--dim); }
+  dd { margin: 0; font-variant-numeric: tabular-nums; }
+  .samples { margin-top: .5rem; color: var(--dim); font-size: .9rem; }
+  .samples button {
+    padding: .1rem .5rem; margin-right: .3rem; font-size: .85rem; border-radius: .35rem;
+  }
+  footer { margin-top: 3rem; padding-top: 1rem; border-top: 1px solid var(--line); color: var(--dim); font-size: .9rem; }
+  a { color: inherit; }
+</style>
+
+<h1>ipgeo-shards</h1>
+<p class="sub">Where an IPv4 address is, read out of the shard it falls in.</p>
+
+<form id="f">
+  <input id="ip" inputmode="decimal" autocomplete="off" spellcheck="false"
+         placeholder="8.8.8.8" aria-label="IPv4 address">
+  <button type="submit">Look up</button>
+</form>
+<p class="samples">
+  <button type="button" data-ip="8.8.8.8">8.8.8.8</button>
+  <button type="button" data-ip="1.1.1.1">1.1.1.1</button>
+  <button type="button" data-ip="9.9.9.9">9.9.9.9</button>
+  <button type="button" data-ip="114.114.114.114">114.114.114.114</button>
+</p>
+
+<div id="out"></div>
+
+<footer>
+  IP geolocation by <a href="https://db-ip.com">DB-IP</a>, used under
+  <a href="https://creativecommons.org/licenses/by/4.0/">CC BY 4.0</a>.
+  <br>
+  Source and format: <a href="https://github.com/lollipopkit/ipgeo-shards">lollipopkit/ipgeo-shards</a>.
+  The address you type is not sent anywhere — the shard it falls in is what is
+  requested, and one shard covers 16.7 million addresses.
+</footer>
+
+<script type="module">
+const out = document.getElementById('out');
+const field = document.getElementById('ip');
+
+let index = null;
+const shards = new Map();
+
+/** A dotted quad as the 32-bit key, or null. Refuses anything that is not one. */
+function key(text) {
+  const parts = text.trim().split('.');
+  if (parts.length !== 4) return null;
+  let value = 0;
+  for (const part of parts) {
+    // `Number` on its own accepts '0x8' and ' 8'; a lookup that quietly read
+    // a different address than the one typed would be worse than an error.
+    if (!/^\d{1,3}$/.test(part)) return null;
+    const n = Number(part);
+    if (n > 255) return null;
+    value = value * 256 + n;
+  }
+  return value;
+}
+
+async function loadIndex() {
+  if (index) return index;
+  const r = await fetch('v1/index.json');
+  if (!r.ok) throw new Error(`the index answered ${r.status}`);
+  index = await r.json();
+  if (index.version !== 1) throw new Error(`index version ${index.version}`);
+  return index;
+}
+
+async function loadShard(family, shard) {
+  if (shards.has(shard)) return shards.get(shard);
+  const name = String(shard).padStart(3, '0');
+  const r = await fetch(`${family.dir}/${name}.bin`);
+  if (!r.ok) throw new Error(`shard ${name} answered ${r.status}`);
+  const bytes = new Uint8Array(await r.arrayBuffer());
+  if (bytes.length === 0 || bytes.length % family.recordBytes !== 0) {
+    throw new Error(`shard ${name} is not a whole number of records`);
+  }
+  shards.set(shard, bytes);
+  return bytes;
+}
+
+/** The last record at or below `offset`. The whole client, right here. */
+function search(bytes, family, offset) {
+  const { recordBytes: stride, startBytes: width } = family;
+  let lo = 0, hi = bytes.length / stride - 1, found = -1;
+  while (lo <= hi) {
+    const mid = (lo + hi) >> 1;
+    let start = 0;
+    for (let i = 0; i < width; i++) start = start * 256 + bytes[mid * stride + i];
+    if (start <= offset) { found = mid; lo = mid + 1; } else { hi = mid - 1; }
+  }
+  if (found < 0) return null;
+  const view = new DataView(bytes.buffer, bytes.byteOffset + found * stride + width);
+  const lat = view.getInt16(0);
+  // The one value the quantisation cannot produce, so it means "nothing is
+  // allocated here" rather than a place.
+  if (lat === -32768) return null;
+  return { lat: lat / 32767 * 90, lon: view.getInt16(2) / 32767 * 180 };
+}
+
+function show(html) { out.innerHTML = html; }
+
+async function lookup(text) {
+  const k = key(text);
+  if (k === null) return show('<p class="err">That is not an IPv4 address.</p>');
+
+  show('<p class="note">Looking…</p>');
+  try {
+    const idx = await loadIndex();
+    const family = idx.families?.ip4;
+    if (!family) throw new Error('this endpoint serves no IPv4 shards');
+
+    const shard = k >>> (family.keyBits - family.shardBits);
+    if (!family.present.includes(shard)) {
+      return show(
+        `<p class="note">No data for ${shard}.0.0.0/8 — the index does not ` +
+        `list it, so nothing was requested.</p>`,
+      );
+    }
+
+    const bytes = await loadShard(family, shard);
+    const offset = k - (shard << (family.keyBits - family.shardBits));
+    const at = search(bytes, family, offset);
+
+    if (!at) {
+      return show(
+        `<p class="note">${text} falls in a gap: the shard for ` +
+        `${shard}.0.0.0/8 has no data covering it.</p>`,
+      );
+    }
+    const maps = `https://www.openstreetmap.org/?mlat=${at.lat.toFixed(4)}&mlon=${at.lon.toFixed(4)}#map=9/${at.lat.toFixed(4)}/${at.lon.toFixed(4)}`;
+    show(`
+      <p class="coord">${at.lat.toFixed(4)}, ${at.lon.toFixed(4)}</p>
+      <p class="note"><a href="${maps}" rel="noreferrer">See it on a map</a></p>
+      <dl>
+        <dt>shard</dt><dd>${shard}.0.0.0/8 &middot; ${(bytes.length / 1024).toFixed(0)} KB &middot; ${bytes.length / family.recordBytes} records</dd>
+        <dt>disclosed</dt><dd>${family.shardBits} bits &mdash; ${shard}.0.0.0/8, not ${text}</dd>
+        <dt>data</dt><dd>${idx.generated}</dd>
+      </dl>
+    `);
+  } catch (e) {
+    show(`<p class="err">${e.message}</p>`);
+  }
+}
+
+document.getElementById('f').addEventListener('submit', (e) => {
+  e.preventDefault();
+  lookup(field.value);
+});
+for (const b of document.querySelectorAll('.samples button')) {
+  b.addEventListener('click', () => { field.value = b.dataset.ip; lookup(b.dataset.ip); });
+}
+</script>

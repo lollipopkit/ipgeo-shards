@@ -71,11 +71,15 @@ jobs:
       - name: What was produced
         if: github.event_name != 'pull_request'
         run: |
+          # The shard directory carries the month, so it is read from the
+          # index rather than spelled out — spelling it out is what broke this
+          # step when the month moved into the path.
+          dir=$(python3 -c "import json;print(json.load(open('public/v1/index.json'))['families']['ip4']['dir'])")
           ls -la public
           echo "country_v1.bin: $(stat -c%s public/country_v1.bin) bytes"
-          echo "shards: $(ls public/v1/ip4 | wc -l)"
-          du -sh public/v1/ip4
-          cat public/v1/index.json | head -30
+          echo "shards in $dir: $(ls "public/$dir" | wc -l)"
+          du -sh "public/$dir"
+          head -c 2000 public/v1/index.json
 
       # Checked here rather than trusted, because both are silent when wrong:
       # a client that cannot read the file falls back to a coarser answer, and
@@ -159,7 +163,8 @@ jobs:
         run: |
           mkdir -p release
           cp public/country_v1.bin public/v1/index.json release/
-          for f in public/v1/ip4/*.bin; do
+          dir=$(python3 -c "import json;print(json.load(open('public/v1/index.json'))['families']['ip4']['dir'])")
+          for f in "public/$dir"/*.bin; do
             cp "$f" "release/ip4-$(basename "$f")"
           done
           ls release | wc -l

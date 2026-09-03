@@ -112,6 +112,14 @@ class Container(unittest.TestCase):
     def test_the_image_does_not_run_as_root(self):
         self.assertIn("USER nginx", DOCKERFILE.read_text())
 
+    def test_the_config_is_checked_at_build_time(self):
+        # Whether nginx accepts a config is not something this can decide —
+        # only nginx can. `nginx -t` in the build is what does, and it is here
+        # so that removing it is a deliberate act: without it a config error
+        # ships and the container restart-loops, which is what happened to an
+        # unquoted regex containing braces.
+        self.assertIn("RUN nginx -t", DOCKERFILE.read_text())
+
     def test_the_base_is_pinned(self):
         # A rebuild of the same commit should be the same image; the data
         # changes monthly and the base should not change under it.
