@@ -25,6 +25,19 @@ from pathlib import Path
 
 BASE = "https://download.db-ip.com/free"
 
+#: Sent on every request, and **not optional**.
+#:
+#: DB-IP answers 403 to Python's default `Python-urllib/3.x` User-Agent. Any
+#: other value is accepted, so this is not authentication and not a limit being
+#: worked around — it is a bot filter that the standard library's default trips
+#: over. Removing it as noise turns the monthly build into a 403 with a
+#: traceback and nothing naming the cause.
+USER_AGENT = "ipgeo-shards (+https://github.com/lollipopkit/ipgeo-shards)"
+
+#: A hung connection must not hang the build. DB-IP serves 90 MB, so this is
+#: per read rather than for the whole transfer.
+TIMEOUT = 60
+
 #: How many months back to look before giving up.
 #:
 #: Three, not one. One covers the first of the month; three covers DB-IP
@@ -59,7 +72,8 @@ def fetch(dataset: str, cache: Path, today: date | None = None) -> tuple[Path, s
         url = f"{BASE}/{name}"
         try:
             print(f"fetching {url}")
-            with urllib.request.urlopen(url) as response:
+            request = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
+            with urllib.request.urlopen(request, timeout=TIMEOUT) as response:
                 data = response.read()
         except urllib.error.HTTPError as e:
             if e.code != 404:

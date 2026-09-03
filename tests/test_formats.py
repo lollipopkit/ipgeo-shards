@@ -8,16 +8,24 @@ and nothing to pin.
 
 from __future__ import annotations
 
+import contextlib
+import io
 import ipaddress
 import json
+import shutil
 import struct
 import sys
+import tempfile
 import unittest
+import urllib.error
+import urllib.request
+from datetime import date
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 import build  # noqa: E402
+import dbip  # noqa: E402
 import formats  # noqa: E402
 from formats import CountryRange, ShardRecord  # noqa: E402
 
@@ -158,6 +166,100 @@ class Collapse(unittest.TestCase):
         forwards = build._collapse([(0, 9, "CN"), (20, 29, "US")])
         backwards = build._collapse([(20, 29, "US"), (0, 9, "CN")])
         self.assertEqual(forwards, backwards)
+
+
+class Fetch(unittest.TestCase):
+    """The download, which is the one path a monthly build cannot do without.
+
+    It had no test and it was broken: DB-IP answers 403 to Python's default
+    `Python-urllib` User-Agent, and every local run had been served from a
+    cache filled by hand — so the first time it ran for real was in CI.
+
+    The network is stubbed. What is worth pinning is the request this builds
+    and the walk back through the months, not whether DB-IP is up.
+    """
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.tmp)
+        self.requests: list[urllib.request.Request] = []
+        self.real = urllib.request.urlopen
+        urllib.request.urlopen = self._fake
+        self.addCleanup(setattr, urllib.request, "urlopen", self.real)
+        #: month -> body, or an HTTP status to raise
+        self.answers: dict[str, object] = {}
+
+    def _fake(self, request, timeout=None):
+        self.requests.append(request)
+        for month, answer in self.answers.items():
+            if month in request.full_url:
+                if isinstance(answer, int):
+                    raise urllib.error.HTTPError(
+                        request.full_url, answer, "no", {}, None
+                    )
+                return contextlib.closing(io.BytesIO(answer))
+        raise urllib.error.HTTPError(request.full_url, 404, "no", {}, None)
+
+    def test_sends_a_user_agent_that_is_not_the_default(self):
+        # The whole bug. Any value is accepted; the default is not.
+        self.answers["2026-09"] = b"body"
+        dbip.fetch("country", self.tmp, today=date(2026, 9, 4))
+        agent = self.requests[0].get_header("User-agent")
+        self.assertIsNotNone(agent)
+        self.assertNotIn("Python-urllib", agent)
+        self.assertIn("ipgeo-shards", agent)
+
+    def test_asks_for_this_month_first(self):
+        self.answers["2026-09"] = b"body"
+        path, month = dbip.fetch("city", self.tmp, today=date(2026, 9, 4))
+        self.assertEqual(month, "2026-09")
+        self.assertEqual(path.read_bytes(), b"body")
+        self.assertEqual(len(self.requests), 1)
+
+    def test_walks_back_when_the_month_is_not_published(self):
+        # The first of the month, before DB-IP has published.
+        self.answers["2026-08"] = b"august"
+        path, month = dbip.fetch("country", self.tmp, today=date(2026, 9, 1))
+        self.assertEqual(month, "2026-08")
+        self.assertEqual(path.read_bytes(), b"august")
+
+    def test_walks_back_across_a_year(self):
+        self.answers["2025-12"] = b"december"
+        _path, month = dbip.fetch("country", self.tmp, today=date(2026, 1, 2))
+        self.assertEqual(month, "2025-12")
+
+    def test_gives_up_after_the_stated_number_of_months(self):
+        with self.assertRaises(SystemExit):
+            dbip.fetch("country", self.tmp, today=date(2026, 9, 4))
+        self.assertEqual(len(self.requests), dbip.MAX_MONTHS_BACK + 1)
+
+    def test_a_403_is_raised_rather_than_walked_past(self):
+        # Only a 404 means "not published yet". Treating a 403 as one would
+        # walk back three months and then report the wrong thing entirely —
+        # which is what would have hidden this bug for another month.
+        self.answers["2026-09"] = 403
+        with self.assertRaises(urllib.error.HTTPError):
+            dbip.fetch("country", self.tmp, today=date(2026, 9, 4))
+
+    def test_a_cached_file_is_not_downloaded_again(self):
+        (self.tmp / "dbip-country-lite-2026-09.csv.gz").write_bytes(b"cached")
+        path, month = dbip.fetch("country", self.tmp, today=date(2026, 9, 4))
+        self.assertEqual(month, "2026-09")
+        self.assertEqual(path.read_bytes(), b"cached")
+        self.assertEqual(self.requests, [])
+
+    def test_an_empty_cached_file_is_ignored(self):
+        # What an interrupted run leaves if the rename is skipped. Taking it
+        # for a hit would build the month from nothing.
+        (self.tmp / "dbip-country-lite-2026-09.csv.gz").write_bytes(b"")
+        self.answers["2026-09"] = b"body"
+        path, _month = dbip.fetch("country", self.tmp, today=date(2026, 9, 4))
+        self.assertEqual(path.read_bytes(), b"body")
+
+    def test_nothing_partial_is_left_behind(self):
+        self.answers["2026-09"] = b"body"
+        dbip.fetch("country", self.tmp, today=date(2026, 9, 4))
+        self.assertEqual(list(self.tmp.glob("*.partial")), [])
 
 
 class SharedVectors(unittest.TestCase):
