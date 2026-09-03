@@ -62,7 +62,7 @@ files come from, so self-hosting changes who serves them and nothing else.
 python3 src/build.py --out public
 ```
 
-and serve `public/` with anything. `public/_headers` is written for Cloudflare;
-`deploy/nginx.conf` is the same rules for nginx. Neither is required — they set
-`Cache-Control` and CORS, and getting them wrong costs bandwidth rather than
+and serve `public/` with anything. `deploy/nginx.conf` is what the image uses
+and is the reference for the headers; nothing about it is required — it sets
+`Cache-Control` and CORS, and getting those wrong costs bandwidth rather than
 correctness.

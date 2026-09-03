@@ -1,10 +1,9 @@
-"""The two files that say the same thing about caching, and the Dockerfile.
+"""What the container serves with, and what it is allowed to write.
 
-`public/_headers` is what the Cloudflare endpoint reads; `deploy/nginx.conf`
-is the same rules for the container. There is no format both sides understand,
-so nothing but this stops them drifting apart — and drifting apart is silent:
-one endpoint would start revalidating a file that cannot change, or stop
-sending CORS, and only a browser would notice.
+Both are silent when wrong. A `Cache-Control` that says a shard expires in an
+hour costs bandwidth nobody measures; a missing CORS header locks out a whole
+class of client and only a browser says so; and a path nginx writes to that is
+not on a tmpfs makes the container restart-loop, which is what it did.
 """
 
 from __future__ import annotations
@@ -14,11 +13,10 @@ import unittest
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-HEADERS = ROOT / "public" / "_headers"
 NGINX = ROOT / "deploy" / "nginx.conf"
 DOCKERFILE = ROOT / "Dockerfile"
 
-#: The paths both files have to agree about, and the max-age each carries.
+#: Every path the endpoint serves, and how long it may be kept.
 #:
 #: The index says which month is current so it has to be re-read; everything
 #: else is versioned and never edited in place, so it can be kept for as long
@@ -30,75 +28,55 @@ EXPECTED_MAX_AGE = {
 }
 
 
-def _headers_rules() -> dict[str, str]:
-    """`_headers` as path -> the Cache-Control it sets."""
-    rules: dict[str, str] = {}
-    current: str | None = None
-    for line in HEADERS.read_text().splitlines():
-        if not line.strip() or line.lstrip().startswith("#"):
-            continue
-        if not line.startswith((" ", "\t")):
-            current = line.strip()
-            continue
-        name, _, value = line.strip().partition(":")
-        if current and name.lower() == "cache-control":
-            rules[current] = value.strip()
-    return rules
+def _location(path: str) -> str:
+    """The body of the `location` block for `path`.
+
+    Matched to the first closing brace with no opening one in between, rather
+    than to a particular indentation. The indentation version quietly matched
+    from one block to the end of the file, so every assertion about
+    `index.json` was really about the whole config and two of them passed for
+    the wrong reason.
+    """
+    block = re.search(
+        r"location\s+(?:=\s+)?" + re.escape(path) + r"\s*\{([^{}]*)\}",
+        NGINX.read_text(),
+    )
+    assert block is not None, f"{path} has no location block"
+    return block.group(1)
 
 
 class CacheControl(unittest.TestCase):
-    def test_both_files_set_the_same_max_age_for_every_path(self):
-        headers = _headers_rules()
-        nginx = NGINX.read_text()
-
+    def test_every_path_is_served_with_the_max_age_it_should_be(self):
         for path, max_age in EXPECTED_MAX_AGE.items():
             with self.subTest(path=path):
-                # `_headers` matches a glob; the paths there end in `*` for a
-                # directory, so compare on the prefix.
-                match = next(
-                    (v for k, v in headers.items() if k.rstrip("*") == path), None
-                )
-                self.assertIsNotNone(match, f"{path} missing from _headers")
-                self.assertIn(f"max-age={max_age}", match)
+                self.assertIn(f"max-age={max_age}", _location(path))
 
-                # nginx names the same path in a `location` and sets the same
-                # number somewhere inside it.
-                block = re.search(
-                    r"location\s+(?:=\s+)?" + re.escape(path) + r"\s*\{(.*?)\n    \}",
-                    nginx,
-                    re.S,
-                )
-                self.assertIsNotNone(block, f"{path} missing from nginx.conf")
-                self.assertIn(f"max-age={max_age}", block.group(1))
+    def test_the_versioned_paths_are_immutable_and_the_index_is_not(self):
+        # A versioned path is never edited in place, so a client may keep it
+        # for as long as it likes. The index is what says which month is
+        # current, so it has to be re-read or a client never learns.
+        self.assertNotIn("immutable", _location("/v1/index.json"))
+        self.assertIn("must-revalidate", _location("/v1/index.json"))
+        self.assertIn("immutable", _location("/v1/ip4/"))
+        self.assertIn("immutable", _location("/country_v1.bin"))
 
-    def test_the_immutable_paths_are_the_same_on_both_sides(self):
-        headers = _headers_rules()
-        nginx = NGINX.read_text()
-        for path, value in headers.items():
-            if "immutable" not in value:
-                continue
-            bare = path.rstrip("*")
-            with self.subTest(path=bare):
-                block = re.search(
-                    r"location\s+(?:=\s+)?" + re.escape(bare) + r"\s*\{(.*?)\n    \}",
-                    nginx,
-                    re.S,
-                )
-                self.assertIsNotNone(block, f"{bare} is immutable only in _headers")
-                self.assertIn("immutable", block.group(1))
-
-    def test_cors_is_open_on_both(self):
-        # The app is not a browser, but the panel and anything else built on
-        # this is. A missing header here is a class of client that cannot use
-        # the endpoint at all.
-        self.assertIn("Access-Control-Allow-Origin: *", HEADERS.read_text())
+    def test_cors_is_open_everywhere(self):
+        # The app is not a browser, but a panel or anything else built on this
+        # is. A missing header here is a class of client that cannot use the
+        # endpoint at all.
         for path in EXPECTED_MAX_AGE:
-            block = re.search(
-                r"location\s+(?:=\s+)?" + re.escape(path) + r"\s*\{(.*?)\n    \}",
-                NGINX.read_text(),
-                re.S,
-            )
-            self.assertIn("Access-Control-Allow-Origin", block.group(1), path)
+            self.assertIn("Access-Control-Allow-Origin", _location(path), path)
+
+    def test_nothing_outside_the_contract_is_served(self):
+        # No directory listing, and no reaching past the root.
+        nginx = NGINX.read_text()
+        self.assertIn("autoindex off", nginx)
+        self.assertIn("return 404", _location("/"))
+
+    def test_the_shards_are_not_logged(self):
+        # The whole design is that a request discloses only a prefix. Writing
+        # down which prefix somebody asked for is the one thing it avoids.
+        self.assertRegex(NGINX.read_text(), r"\baccess_log\s+off;")
 
 
 class Container(unittest.TestCase):

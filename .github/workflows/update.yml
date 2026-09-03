@@ -99,9 +99,9 @@ jobs:
       # than in a workflow of its own — a separate image build would have to
       # fetch the month's export again and might get a different one.
       #
-      # Not gated on `deploy`: the image is the artefact anyone self-hosting
-      # pulls, and it costs nothing to publish. The Cloudflare step below is
-      # gated because it is the maintainer's own endpoint.
+      # Not gated on `deploy`: the image *is* the endpoint — the host pulls
+      # it — and it costs nothing to publish. The release below is gated
+      # because it is a second copy of 24 MB across 223 assets.
       - name: Set up QEMU
         if: github.event_name != 'pull_request'
         uses: docker/setup-qemu-action@29109295f81e9208d7d86ff1c6c12d2833863392 # v3
@@ -133,14 +133,11 @@ jobs:
             ${{ env.IMAGE }}:latest
           provenance: false
 
-      - name: Publish to Cloudflare
-        if: >-
-          github.event_name == 'schedule' ||
-          (github.event_name == 'workflow_dispatch' && inputs.deploy)
-        uses: cloudflare/wrangler-action@v3
-        with:
-          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      # There is no deploy step for the primary endpoint. It runs the image
+      # published above, so publishing the image *is* the deploy — the host
+      # pulls it. Nothing here holds a credential to that host, which is the
+      # arrangement worth keeping: a workflow that could reach into the server
+      # would be a workflow worth compromising.
 
       # The second endpoint. `releases/latest/download/<file>` is a fixed URL
       # that needs no tag lookup, so a client falling back to it has nothing to

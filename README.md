@@ -44,7 +44,8 @@ by default.
 
 Both endpoints serve the same bytes from the same build:
 
-- `https://ipgeo.lollipopkit.com/` — the maintainer's host, behind Cloudflare
+- `https://ipgeo.lollipopkit.com/` — an `ipgeo-shards` container on the
+  maintainer's host, behind Cloudflare's CDN. The same image anyone can run
 - `https://github.com/lollipopkit/ipgeo-shards/releases/latest/download/` —
   the fallback, for a network where the first is unreachable. Release assets
   cannot contain `/` in a name, so the shards are flattened to `ip4-NNN.bin`.
@@ -198,15 +199,20 @@ failing.
 
 ## Deploying
 
-`wrangler.toml` declares an assets directory and no `main`. There is no Worker
-script — nothing needs to run, and a Worker that did nothing would still be a
-place a request could be logged.
+CI builds on the 4th of each month and pushes the image to ghcr.io. **That is
+the whole deploy**: the host runs `ghcr.io/lollipopkit/ipgeo-shards:latest`
+and picks the month up with a `docker compose pull`. Nothing in this
+repository holds a credential to that host, which is the arrangement worth
+keeping — a workflow that could reach into the server would be a workflow
+worth compromising.
 
-CI publishes on the 4th of each month, and on a manual run with `deploy: true`.
+A GitHub Release goes out in the same run, which is the second endpoint. It
+needs `deploy: true` on a manual run, or the monthly schedule.
+
 A pull request runs the tests and stops there: downloading 90 MB to throw the
 result away is twenty minutes for no answer the tests did not already give.
 
-Two secrets: `CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID`.
+No secrets. `GITHUB_TOKEN` is what pushes the image and cuts the release.
 
 ## Self-hosting
 
