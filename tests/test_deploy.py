@@ -22,9 +22,11 @@ DOCKERFILE = ROOT / "Dockerfile"
 #: else is versioned and never edited in place, so it can be kept for as long
 #: as a client likes.
 EXPECTED_MAX_AGE = {
-    "/v1/index.json": 3600,
-    "/v1/ip4/": 2592000,
-    "/country_v1.bin": 2592000,
+    "= /v1/index.json": 3600,
+    # A regex location: the month is part of the path, which is what makes
+    # `immutable` true.
+    "~ ^/v1/[0-9]{4}-[0-9]{2}/": 2592000,
+    "= /country_v1.bin": 2592000,
 }
 
 
@@ -38,7 +40,7 @@ def _location(path: str) -> str:
     the wrong reason.
     """
     block = re.search(
-        r"location\s+(?:=\s+)?" + re.escape(path) + r"\s*\{([^{}]*)\}",
+        r"location\s+" + re.escape(path) + r"\s*\{([^{}]*)\}",
         NGINX.read_text(),
     )
     assert block is not None, f"{path} has no location block"
@@ -55,10 +57,10 @@ class CacheControl(unittest.TestCase):
         # A versioned path is never edited in place, so a client may keep it
         # for as long as it likes. The index is what says which month is
         # current, so it has to be re-read or a client never learns.
-        self.assertNotIn("immutable", _location("/v1/index.json"))
-        self.assertIn("must-revalidate", _location("/v1/index.json"))
-        self.assertIn("immutable", _location("/v1/ip4/"))
-        self.assertIn("immutable", _location("/country_v1.bin"))
+        self.assertNotIn("immutable", _location("= /v1/index.json"))
+        self.assertIn("must-revalidate", _location("= /v1/index.json"))
+        self.assertIn("immutable", _location("~ ^/v1/[0-9]{4}-[0-9]{2}/"))
+        self.assertIn("immutable", _location("= /country_v1.bin"))
 
     def test_cors_is_open_everywhere(self):
         # The app is not a browser, but a panel or anything else built on this

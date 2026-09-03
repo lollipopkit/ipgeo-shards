@@ -31,7 +31,7 @@ rate limit and no account.
 | Path | What | Size |
 |---|---|---|
 | `country_v1.bin` | One coordinate per country, and a range table over IPv4 and IPv6 | 4.1 MB, ~2 MB compressed |
-| `v1/ip4/NNN.bin` | City coordinates for `NNN.0.0.0/8` | 221 files, 110 KB mean, 286 KB largest |
+| `v1/<month>/ip4/NNN.bin` | City coordinates for `NNN.0.0.0/8` | 221 files, 110 KB mean, 286 KB largest |
 | `v1/index.json` | Which shards exist, and the record layout to read them with | 2 KB |
 
 `country_v1.bin` is **bundled inside the app** rather than fetched. It is the
@@ -49,6 +49,13 @@ Both endpoints serve the same bytes from the same build:
 - `https://github.com/lollipopkit/ipgeo-shards/releases/latest/download/` —
   the fallback, for a network where the first is unreachable. Release assets
   cannot contain `/` in a name, so the shards are flattened to `ip4-NNN.bin`.
+
+**The month is in the shard path**, and `v1/index.json` is what names the
+directory — build the path from `families.ip4.dir` rather than assembling it.
+It is there so a shard really is immutable: the data changes monthly, and at a
+stable URL a thirty-day `Cache-Control` would have a CDN serving last month's
+answer for another thirty days. A build carries one month and no more, so last
+month's paths stop existing when this month's deploys.
 
 ## Coverage
 
@@ -148,7 +155,7 @@ bit ever being set, which removes a whole class of comparison bug from every
 client — at 64 bits, prefixes in `8000::/1` sort below zero, and nothing routed
 today is up there to make that obvious.
 
-### `v1/ip4/NNN.bin`
+### `v1/<month>/ip4/NNN.bin`
 
 ```
 records          n x 7 B: offset u24 + lat i16 + lon i16
@@ -156,8 +163,9 @@ records          n x 7 B: offset u24 + lat i16 + lon i16
 
 `offset` is the address minus the shard's own first address. The first record
 is always at offset 0, so no address in the shard is below the table. Read
-`shardBits`, `keyBits`, `startBytes` and `recordBytes` out of `index.json`
-rather than hard-coding them.
+`shardBits`, `keyBits`, `startBytes`, `recordBytes` and `dir` out of
+`index.json` rather than hard-coding them — `dir` in particular, since it
+carries the month.
 
 ## Building
 

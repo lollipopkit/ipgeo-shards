@@ -134,6 +134,11 @@ def check_shards(out: Path, index: dict) -> None:
     present = family["present"]
 
     listed = {int(p.stem) for p in (out / family["dir"]).glob("*.bin")}
+    # The month is in the directory, so a stale one left behind would be
+    # served alongside this one — and both would look current.
+    months = [d.name for d in (out / "v1").iterdir() if d.is_dir()]
+    if len(months) != 1:
+        raise SystemExit(f"v1/ holds {months}, expected exactly one month")
     if listed != set(present):
         missing = sorted(set(present) - listed)
         extra = sorted(listed - set(present))

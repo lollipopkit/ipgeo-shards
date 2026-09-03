@@ -10,8 +10,12 @@ Two artefacts, from two DB-IP exports:
     About 4 MB, bundled *inside* the app — so it answers offline, on a first
     run, and for anyone who leaves the shard download switched off.
 
-``v1/ip4/NNN.bin`` + ``v1/index.json``
-    City-level coordinates, one file per /8, fetched on demand.
+``v1/<month>/ip4/NNN.bin`` + ``v1/index.json``
+    City-level coordinates, one file per /8, fetched on demand. The month is
+    in the path so a shard really is immutable: the data changes monthly, and
+    at a stable URL a thirty-day `Cache-Control` would mean a CDN serving last
+    month's answer for another thirty days. The index names the directory, so
+    a client never builds the month into a path itself.
 
 Deterministic: same inputs, byte-identical outputs. Every dictionary is walked
 in sorted order and nothing depends on the clock beyond which month's export
@@ -263,9 +267,12 @@ def main() -> None:
 
     print("building the IPv4 city shards")
     shards = ip4_shards(city_csv)
-    shard_dir = args.out / "v1" / "ip4"
-    if shard_dir.exists():
-        shutil.rmtree(shard_dir)
+    shard_rel = f"v1/{city_month}/ip4"
+    shard_dir = args.out / shard_rel
+    # The whole `v1` tree, not just this month's directory: a build carries
+    # one month, so leaving the last one behind would serve two.
+    if (args.out / "v1").exists():
+        shutil.rmtree(args.out / "v1")
     shard_dir.mkdir(parents=True, exist_ok=True)
     total = 0
     largest = 0
@@ -293,7 +300,7 @@ def main() -> None:
                 "keyBits": formats.IP4_KEY_BITS,
                 "startBytes": formats.IP4_START_BYTES,
                 "recordBytes": formats.IP4_RECORD_BYTES,
-                "dir": "v1/ip4",
+                "dir": shard_rel,
                 # The same shard on the fallback endpoint. A release asset's
                 # name cannot contain a slash, so the path is flattened —
                 # stated here rather than left for a client to know by
