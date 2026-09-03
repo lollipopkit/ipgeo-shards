@@ -49,27 +49,53 @@ Both endpoints serve the same bytes from the same build:
   the fallback, for a network where the first is unreachable. Release assets
   cannot contain `/` in a name, so the shards are flattened to `ip4-NNN.bin`.
 
-## There are no IPv6 city shards, and that is measured
+## Coverage
 
-IPv6 gets country-level accuracy from `country_v1.bin`, not city-level. This
-is not an oversight and not a to-do — it is what the data allows:
+Both families are placed at **country level for 100.00% of routable IPv4
+space** — DB-IP's country export leaves exactly 256 addresses as `ZZ` — and
+for effectively all of allocated IPv6. That is what `country_v1.bin` gives
+offline, with nothing asked and nothing downloaded.
 
-| Sharding | Files | Largest shard | Verdict |
+The city shards cover **100.00% of routable IPv4** too: no row is dropped for
+a missing coordinate, and none sits on Null Island. "Routable" here means
+everything `isPrivateHost` does not already refuse — 3,702,258,688 addresses,
+86.2% of the 32-bit space.
+
+**IPv6 has no city shards.** It is answered at country level and nowhere
+finer. That is a scope decision rather than an impossibility, and it is worth
+writing down which:
+
+A *fixed* shard depth does not work. Ranges have to be written into every
+shard they span, or a lookup lands in an empty file and finds nothing — and
+IPv6 ranges are enormous in prefix space, so the record count grows with the
+depth while the shard size falls:
+
+| Depth | Files | Records | Largest shard |
 |---|---|---|---|
-| by first byte | 9 | 22 MB | one shard is a quarter of the dataset |
-| by first 2 bytes | 82 | 9.7 MB | 14 shards over 500 KB |
-| by first 3 bytes | 9,186 | 2.3 MB | 15 shards over 500 KB |
-| by first 4 bytes | 131,002 | 512 KB | over Cloudflare's 20,000-file limit |
+| /8 | 222 | 4.16 M | 16.6 MB |
+| /16 | 56,768 | 4.22 M | 6.5 MB |
+| /24 | 1,043,906 | 5.20 M | 1.8 MB |
 
-The IPv6 space is allocated so unevenly that no fixed prefix balances it. The
-other direction — coarsening the *key* so records merge — does not help either:
-keying at /48 removes 3% of the records, and /40, which removes 82%, does so by
-merging cities that are genuinely different places. At that point the answer is
-country-level anyway, and `country_v1.bin` already gives that for free and
-offline.
+Every depth is bad at one end or the other: /8 and /12 keep the file count
+small and leave one shard at 16 MB, while anything fine enough to cap a shard
+needs 50,000 to a million files against Cloudflare's limit of 20,000.
+
+A *variable* depth does work, and has been measured: split a shard only when
+it would exceed 512 KB, eight bits at a time, and the result is 6,388 files
+totalling 25 MB with none over 509 KB — 8 prefixes staying at /8, 1,268 at
+/16, 3,064 at /24 and 2,048 at /32. The index would carry the depth each
+prefix ended up at. That is a real option and it is not built; the country
+answer is what IPv6 gets for now.
+
+Coarsening the *key* instead is not a way out: /48 removes 3% of the records
+and /40 removes 82% by merging cities that are genuinely different places, at
+which point the answer is country-level anyway.
 
 Merging adjacent ranges is worth about 1% on both families, because DB-IP has
-already merged everything sharing a city.
+already merged everything sharing a city. Quantising the coordinates is worth
+little more — going from 1.1 km to 110 km precision removes only 29% of the
+records, since what makes them numerous is how finely the address space is
+carved up rather than how often a coordinate repeats.
 
 ## Where a country is drawn
 

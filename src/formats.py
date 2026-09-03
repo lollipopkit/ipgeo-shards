@@ -146,10 +146,11 @@ def build_country_db(
 #: whole reason this is static files rather than a query API: the limit is a
 #: property of the protocol, not a promise about whoever runs the server.
 #:
-#: It is also why there are no IPv6 shards — see the README. A prefix coarse
-#: enough to keep an anonymity set worth having is one no fixed sharding keeps
-#: under Cloudflare's file limit, and a prefix fine enough to fit discloses
-#: more than the country database already answers for free.
+#: IPv6 has no shards at all, and the reason is not this constant — see the
+#: coverage section of the README. No *fixed* depth works there: a range has to
+#: be written into every shard it spans, and IPv6 ranges are wide enough in
+#: prefix space that /8 leaves one shard at 16 MB while /24 needs a million
+#: files. A variable depth does work and is not built.
 IP4_SHARD_BITS = 8
 IP4_KEY_BITS = 32
 IP4_START_BYTES = 3
