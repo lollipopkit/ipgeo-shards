@@ -1,0 +1,25 @@
+# Cloudflare Workers, assets only.
+#
+# There is no `main` and no Worker script, deliberately. Everything this
+# repository serves is a static file, so there is nothing for code to do — and
+# a Worker that did nothing would still be a place where a request could be
+# logged. What the server can learn is meant to be limited by the protocol
+# rather than by a promise, and the smallest configuration is part of that.
+#
+# Asset requests do not count against the Worker request quota and carry no
+# bandwidth or egress charge; the limits are 20,000 files at 25 MiB each. This
+# publishes about 230 files, the largest under 300 KB.
+#
+# Cloudflare Pages would do the same job. It is in maintenance mode and new
+# features go only to the Workers side, so there is no reason to start there.
+
+name = "ipgeo-shards"
+compatibility_date = "2026-01-01"
+
+[assets]
+directory = "./public"
+
+# The default already, and stated so it does not change under us: an unknown
+# path is a 404 rather than a rewrite to some index page, which a client
+# binary-searching a file must be able to tell apart from data.
+not_found_handling = "none"

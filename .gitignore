@@ -1,0 +1,19 @@
+# The DB-IP exports. 90 MB a month, and re-downloadable by definition.
+.cache/
+
+# Build output. Regenerated from the sources above on every run, and published
+# rather than committed — 24 MB a month of binary would make the history the
+# largest thing here.
+#
+# `public/_headers` is *not* output: it is configuration that has to sit in the
+# deployed directory, so it is checked in and the build leaves it alone.
+/public/*
+!/public/_headers
+
+# Release staging, built by CI.
+/release/
+*.tar.gz
+
+__pycache__/
+*.py[cod]
+.venv/

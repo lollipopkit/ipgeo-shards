@@ -1,0 +1,134 @@
+# Rebuilds and publishes the month's data.
+#
+# DB-IP releases on the first of each month, but not at midnight and not
+# always on the first — so this runs on the fourth, and the fetch walks back up
+# to three months if the newest is not there yet. A month with no release
+# therefore republishes the previous one rather than failing.
+name: update
+
+on:
+  schedule:
+    # 04:00 UTC on the 4th. Nothing here is time-critical; the point of the
+    # date is to be comfortably after DB-IP's own publish.
+    - cron: "0 4 4 * *"
+  workflow_dispatch:
+    inputs:
+      deploy:
+        description: "Publish the result, rather than only building it"
+        type: boolean
+        default: false
+  pull_request:
+    paths:
+      - "src/**"
+      - "tests/**"
+      - ".github/workflows/update.yml"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: update
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      # Before anything is fetched or built: the tests need no data and they
+      # are what says the format still matches the shared vectors. A build that
+      # published a file the app cannot read would be worse than no build.
+      - name: Test
+        run: python3 -m unittest discover -s tests -v
+
+      # The vectors are generated, and a change to the format that forgot to
+      # regenerate them would leave the two repositories disagreeing with
+      # nothing to say so.
+      - name: The checked-in vectors match the current format
+        run: |
+          python3 tests/make_vectors.py
+          git diff --exit-code -- tests/vectors || {
+            echo "::error::tests/vectors is stale — run tests/make_vectors.py and commit"
+            exit 1
+          }
+
+      # A pull request stops here. Downloading 90 MB and building 24 MB of
+      # shards to throw them away is twenty minutes for no answer the tests
+      # above did not already give.
+      - name: Build
+        if: github.event_name != 'pull_request'
+        run: python3 src/build.py --out public
+
+      - name: What was produced
+        if: github.event_name != 'pull_request'
+        run: |
+          ls -la public
+          echo "country_v1.bin: $(stat -c%s public/country_v1.bin) bytes"
+          echo "shards: $(ls public/v1/ip4 | wc -l)"
+          du -sh public/v1/ip4
+          cat public/v1/index.json | head -30
+
+      # Checked here rather than trusted, because both are silent when wrong:
+      # a client that cannot read the file falls back to a coarser answer, and
+      # nothing tells anyone.
+      - name: The output is readable
+        if: github.event_name != 'pull_request'
+        run: python3 src/verify.py --out public
+
+      - name: Publish to Cloudflare
+        if: >-
+          github.event_name == 'schedule' ||
+          (github.event_name == 'workflow_dispatch' && inputs.deploy)
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+
+      # The second endpoint. `releases/latest/download/<file>` is a fixed URL
+      # that needs no tag lookup, so a client falling back to it has nothing to
+      # discover first. Same artefacts as the deploy above, from the same run —
+      # two endpoints serving different bytes would be worse than one.
+      #
+      # Each shard is its own asset, not a tarball. A client fetches the one
+      # /8 it needs; an archive would mean downloading 24 MB to read 110 KB,
+      # and would also mean the fallback disclosed *every* octet the user has a
+      # server in rather than one.
+      #
+      # Release asset names cannot contain a slash, so `v1/ip4/008.bin` is
+      # flattened to `ip4-008.bin`. The naming is in the README because a
+      # client has to know it.
+      - name: Stage the release assets
+        if: >-
+          github.event_name == 'schedule' ||
+          (github.event_name == 'workflow_dispatch' && inputs.deploy)
+        run: |
+          mkdir -p release
+          cp public/country_v1.bin public/v1/index.json release/
+          for f in public/v1/ip4/*.bin; do
+            cp "$f" "release/ip4-$(basename "$f")"
+          done
+          ls release | wc -l
+
+      - name: Publish a release
+        if: >-
+          github.event_name == 'schedule' ||
+          (github.event_name == 'workflow_dispatch' && inputs.deploy)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          month=$(python3 -c "import json;print(json.load(open('public/v1/index.json'))['generated'])")
+          notes="IP geolocation by DB-IP (https://db-ip.com), used under CC BY 4.0
+          (https://creativecommons.org/licenses/by/4.0/).
+
+          Built from dbip-city-lite-$month and dbip-country-lite-$month.
+          Shard \`v1/ip4/NNN.bin\` is published here as \`ip4-NNN.bin\`."
+          # Created if it is new, re-uploaded if the month is being rebuilt.
+          # `--clobber` rather than deleting the release, so the fixed
+          # `latest/download` URLs never point at nothing.
+          gh release create "$month" --title "$month" --notes "$notes" release/* \
+            || gh release upload "$month" --clobber release/*
