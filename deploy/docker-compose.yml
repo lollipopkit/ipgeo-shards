@@ -17,14 +17,17 @@ services:
     container_name: ipgeo-shards
     restart: unless-stopped
 
-    # Nothing in here is written. `tmpfs` covers the paths nginx opens anyway
-    # — it keeps a temp directory even when every response is a file it can
-    # send straight from disk.
+    # Nothing in here is written. The two tmpfs mounts cover what nginx opens
+    # regardless: a pid file, and a temp directory it creates at startup even
+    # when every response is a file it can send straight from disk.
+    #
+    # `mode=1777` is load-bearing. A tmpfs mount is root-owned by default, so
+    # without it the `nginx` user cannot create anything under one and the
+    # container restart-loops on `Permission denied`.
     read_only: true
     tmpfs:
-      - /run/nginx
-      - /var/lib/nginx/tmp
-      - /var/log/nginx
+      - /run/nginx:mode=1777
+      - /tmp:mode=1777
 
     # It serves files and answers questions. It does not need to become
     # anything, and it does not need a network of its own beyond the proxy's.

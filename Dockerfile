@@ -14,10 +14,9 @@ FROM alpine:3.24
 
 RUN apk add --no-cache nginx
 
-# nginx's own user exists from the package; it needs somewhere writable for
-# the temp paths a static server still opens.
-RUN mkdir -p /var/lib/nginx/tmp /var/log/nginx /run/nginx \
-    && chown -R nginx:nginx /var/lib/nginx /var/log/nginx /run/nginx
+# The pid file's directory. Everything else nginx writes is redirected to
+# /tmp by the config — see the note there — and both are tmpfs at run time.
+RUN mkdir -p /run/nginx && chown nginx:nginx /run/nginx
 
 COPY deploy/nginx.conf /etc/nginx/nginx.conf
 COPY public/ /srv/ipgeo/
@@ -34,4 +33,7 @@ HEALTHCHECK --interval=30s --timeout=3s --start-period=3s --retries=3 \
 
 EXPOSE 8080
 
-CMD ["nginx", "-g", "daemon off;"]
+# `-e` before anything else: nginx opens its compiled-in error log *before*
+# it reads the config, so `error_log` in the file cannot stop it complaining
+# about a path it cannot write. This can.
+CMD ["nginx", "-e", "/dev/stderr", "-g", "daemon off;"]
