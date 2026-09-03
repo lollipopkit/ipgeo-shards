@@ -1,4 +1,4 @@
-# Rebuilds and publishes the month's data.
+# Rebuilds and publishes the month's data, and the image that serves it.
 #
 # DB-IP releases on the first of each month, but not at midnight and not
 # always on the first — so this runs on the fourth, and the fetch walks back up
@@ -25,6 +25,10 @@ on:
 
 permissions:
   contents: write
+  packages: write
+
+env:
+  IMAGE: ghcr.io/${{ github.repository_owner }}/ipgeo-shards
 
 concurrency:
   group: update
@@ -80,6 +84,55 @@ jobs:
         if: github.event_name != 'pull_request'
         run: python3 src/verify.py --out public
 
+      # Read once and reused by the tags and the release below, so the image
+      # and the release can never be labelled with different months.
+      - name: Which month this is
+        id: month
+        if: github.event_name != 'pull_request'
+        run: |
+          month=$(python3 -c "import json;print(json.load(open('public/v1/index.json'))['generated'])")
+          echo "month=$month" >> "$GITHUB_OUTPUT"
+          echo "built $month"
+
+      # The image and the data it serves come out of one run, so they can
+      # never be a different build. That is the reason this is here rather
+      # than in a workflow of its own — a separate image build would have to
+      # fetch the month's export again and might get a different one.
+      #
+      # Not gated on `deploy`: the image is the artefact anyone self-hosting
+      # pulls, and it costs nothing to publish. The Cloudflare step below is
+      # gated because it is the maintainer's own endpoint.
+      - name: Set up QEMU
+        if: github.event_name != 'pull_request'
+        uses: docker/setup-qemu-action@29109295f81e9208d7d86ff1c6c12d2833863392 # v3
+
+      - name: Set up Buildx
+        if: github.event_name != 'pull_request'
+        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4
+
+      - name: Login to ghcr.io
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Publish the image
+        if: github.event_name != 'pull_request'
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7
+        with:
+          context: .
+          file: Dockerfile
+          # arm64 because that is what the maintainer's host is, and because a
+          # single-arch image would silently not run there.
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: |
+            ${{ env.IMAGE }}:${{ steps.month.outputs.month }}
+            ${{ env.IMAGE }}:latest
+          provenance: false
+
       - name: Publish to Cloudflare
         if: >-
           github.event_name == 'schedule' ||
@@ -121,7 +174,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          month=$(python3 -c "import json;print(json.load(open('public/v1/index.json'))['generated'])")
+          month='${{ steps.month.outputs.month }}'
           notes="IP geolocation by DB-IP (https://db-ip.com), used under CC BY 4.0
           (https://creativecommons.org/licenses/by/4.0/).
 

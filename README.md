@@ -44,7 +44,7 @@ by default.
 
 Both endpoints serve the same bytes from the same build:
 
-- `https://ipgeo.lollipopkit.com/` — Cloudflare, assets only, no Worker script
+- `https://ipgeo.lollipopkit.com/` — the maintainer's host, behind Cloudflare
 - `https://github.com/lollipopkit/ipgeo-shards/releases/latest/download/` —
   the fallback, for a network where the first is unreachable. Release assets
   cannot contain `/` in a name, so the shards are flattened to `ip4-NNN.bin`.
@@ -210,8 +210,19 @@ Two secrets: `CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID`.
 
 ## Self-hosting
 
-The files are static and the build recipe is above, so anyone who would rather
-not talk to this host can serve their own:
+The files are static, so anyone who would rather not talk to this host can
+serve their own. There is an image:
+
+```sh
+docker run -d -p 8080:8080 ghcr.io/lollipopkit/ipgeo-shards:latest
+```
+
+Alpine and nginx, with the month's data baked in — built by the same CI run
+that produced the data, so the image and the files it serves are never a
+different build. `amd64` and `arm64`. See `deploy/` for a compose file and a
+reverse-proxy example.
+
+Or without Docker:
 
 ```sh
 python3 src/build.py --out public

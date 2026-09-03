@@ -1,0 +1,47 @@
+# The reference deployment, and what runs on the maintainer's host.
+#
+# No published port: a reverse proxy in front reaches the container by name on
+# this project's network. Publishing 8080 on the host would put an
+# unauthenticated file server on a public interface for no reason — the proxy
+# is what terminates TLS and what the domain points at.
+#
+#     docker compose pull && docker compose up -d
+#
+# The image carries the data, so an update is a pull. There is no volume and
+# nothing to migrate: the container has nothing to write, which is also why it
+# runs read-only below.
+
+services:
+  ipgeo-shards:
+    image: ghcr.io/lollipopkit/ipgeo-shards:latest
+    container_name: ipgeo-shards
+    restart: unless-stopped
+
+    # Nothing in here is written. `tmpfs` covers the paths nginx opens anyway
+    # — it keeps a temp directory even when every response is a file it can
+    # send straight from disk.
+    read_only: true
+    tmpfs:
+      - /run/nginx
+      - /var/lib/nginx/tmp
+      - /var/log/nginx
+
+    # It serves files and answers questions. It does not need to become
+    # anything, and it does not need a network of its own beyond the proxy's.
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8080/v1/index.json"]
+      interval: 30s
+      timeout: 3s
+      start_period: 3s
+      retries: 3
+
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"

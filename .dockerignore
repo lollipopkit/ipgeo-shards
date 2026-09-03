@@ -1,0 +1,11 @@
+# The build context is `public/` and `deploy/nginx.conf`, and nothing else.
+#
+# `.cache/` is the reason this file exists: it holds 90 MB of DB-IP exports
+# after a local build, and without this every `docker build` would send them
+# to the daemon to be ignored.
+*
+!public/
+!deploy/nginx.conf
+
+# `public/v1/index.json` and the shards are wanted; nothing else under it is.
+public/**/*.partial
