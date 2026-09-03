@@ -23,9 +23,11 @@ DOCKERFILE = ROOT / "Dockerfile"
 #: as a client likes.
 EXPECTED_MAX_AGE = {
     "= /v1/index.json": 3600,
-    # A regex location: the month is part of the path, which is what makes
-    # `immutable` true.
-    "~ ^/v1/[0-9]{4}-[0-9]{2}/": 2592000,
+    # A regex location, quoted — nginx reads an unquoted `{` as the start of a
+    # block. The key is what the file says, braces and quotes included, so a
+    # change to either shows up here rather than in a container that will not
+    # start.
+    '~ "^/v1/[0-9]{4}-[0-9]{2}/"': 2592000,
     "= /country_v1.bin": 2592000,
 }
 
@@ -59,7 +61,7 @@ class CacheControl(unittest.TestCase):
         # current, so it has to be re-read or a client never learns.
         self.assertNotIn("immutable", _location("= /v1/index.json"))
         self.assertIn("must-revalidate", _location("= /v1/index.json"))
-        self.assertIn("immutable", _location("~ ^/v1/[0-9]{4}-[0-9]{2}/"))
+        self.assertIn("immutable", _location('~ "^/v1/[0-9]{4}-[0-9]{2}/"'))
         self.assertIn("immutable", _location("= /country_v1.bin"))
 
     def test_cors_is_open_everywhere(self):
