@@ -196,3 +196,141 @@ def build_ip4_shard(records: list[ShardRecord]) -> bytes:
         out += r.offset.to_bytes(IP4_START_BYTES, "big")
         out += struct.pack(">hh", r.lat, r.lon)
     return bytes(out)
+
+
+# ---------------------------------------------------------------------------
+# The bundle: one file, both families, city level throughout.
+# ---------------------------------------------------------------------------
+
+BUNDLE_MAGIC = b"SBGX"
+BUNDLE_FORMAT = 1
+
+#: How many leading bits of an IPv6 address the table keys on.
+#:
+#: 48, and measured rather than picked. At /48, 3,898,564 city ranges stay
+#: distinguishable; /64 raises that only to 4,030,857 — 3% more distinctions
+#: for 8 MB more file. /40 would merge different cities outright.
+#:
+#: It also removes a hazard rather than only saving bytes. A 64-bit prefix in
+#: `8000::/1` is *negative* as a signed 64-bit integer, which is what Dart has,
+#: so every comparison in a reader's binary search would need to be unsigned —
+#: and nothing routed today is up there, so getting it wrong would wait years
+#: to surface. 48 bits is always positive.
+IP6_KEY_BITS = 48
+
+#: Bits of the key that pick a first-level bucket, for each family.
+#:
+#: The bucket is not sharding left over from the file-per-/8 layout — that was
+#: forced by a CDN's 20,000-file limit and is gone with it. It is in the file
+#: because it makes every record's start *relative*, and a relative start is
+#: three or four bytes instead of four or six. Measured on the real data, and
+#: it wins after compression too, which is the only size that matters to
+#: someone downloading it: IPv4 13.62 MB against 14.20 flat, IPv6 11.89
+#: against 12.20.
+IP4_BUCKET_BITS = 8
+IP6_BUCKET_BITS = 16
+
+IP4_OFFSET_BYTES = (32 - IP4_BUCKET_BITS) // 8          # 3
+IP6_OFFSET_BYTES = (IP6_KEY_BITS - IP6_BUCKET_BITS) // 8  # 4
+IP4_BUNDLE_RECORD = IP4_OFFSET_BYTES + 4
+IP6_BUNDLE_RECORD = IP6_OFFSET_BYTES + 4
+
+_HEADER = struct.Struct(">4sBHBII")
+BUNDLE_HEADER_BYTES = _HEADER.size                       # 16
+
+
+@dataclass(frozen=True)
+class BundleRecord:
+    """One row of either family: where it starts, and what is there."""
+
+    start: int
+    """The whole key — 32 bits for IPv4, [IP6_KEY_BITS] for IPv6.
+
+    Split into bucket and offset by the writer, so a caller never has to know
+    the layout to hand over a row.
+    """
+
+    lat: int
+    lon: int
+    """Quantised, or ([NO_DATA], 0) for a gap."""
+
+
+def _bucketed(
+    records: list[BundleRecord],
+    key_bits: int,
+    bucket_bits: int,
+    offset_bytes: int,
+) -> tuple[bytes, bytes, int]:
+    """A family's bucket table and its records.
+
+    Every bucket that has any record must begin with one at offset 0, or an
+    address in the low part of it falls below every row and has no answer at
+    all — which is a different thing from having no data, and the difference is
+    the whole reason [NO_DATA] exists. The caller is responsible for that; this
+    refuses a list that breaks it rather than writing a file that reads wrong.
+    """
+    span_bits = key_bits - bucket_bits
+    buckets = 1 << bucket_bits
+    table = bytearray()
+    body = bytearray()
+    at = 0
+    index = 0
+    previous = -1
+    for bucket in range(buckets):
+        table += at.to_bytes(4, "big")
+        first_in_bucket = True
+        while index < len(records) and (records[index].start >> span_bits) == bucket:
+            r = records[index]
+            if r.start <= previous:
+                raise SystemExit(f"bundle records out of order at {r.start}")
+            previous = r.start
+            offset = r.start & ((1 << span_bits) - 1)
+            if first_in_bucket and offset != 0:
+                raise SystemExit(
+                    f"bucket {bucket} starts at offset {offset}, not 0"
+                )
+            first_in_bucket = False
+            body += offset.to_bytes(offset_bytes, "big")
+            body += struct.pack(">hh", r.lat, r.lon)
+            at += 1
+            index += 1
+    # The closing entry, so a reader takes `table[n]..table[n+1]` without a
+    # special case for the last bucket.
+    table += at.to_bytes(4, "big")
+    return bytes(table), bytes(body), at
+
+
+def build_bundle(
+    ip4: list[BundleRecord],
+    ip6: list[BundleRecord],
+    year: int,
+    month: int,
+) -> bytes:
+    """Everything ServerBox needs to place an address, in one file.
+
+    ```text
+    magic "SBGX"          4 B
+    format                1 B   == 1
+    year u16, month u8    3 B
+    ip4Count u32          4 B
+    ip6Count u32          4 B
+    ip4 table   257 x u32        record index each /8 begins at
+    ip6 table 65537 x u32        record index each /16 of the /48 key begins at
+    ip4 records ip4Count x 7 B   offset u24 + lat i16 + lon i16
+    ip6 records ip6Count x 8 B   offset u32 + lat i16 + lon i16
+    ```
+
+    One file rather than 221, because the sharding only ever bought bandwidth:
+    it cost eight bits of disclosure per lookup, and downloading the lot costs
+    none at all. It also removes the index, the `present` set, the per-shard
+    cache, the second endpoint's flattened names and the month in the path —
+    all of which existed to make many files work.
+
+    The month is in the header rather than the filename so a reader can tell
+    what it has without being told, which is what makes "replace the old one"
+    a decision the app can take on its own.
+    """
+    t4, b4, n4 = _bucketed(ip4, 32, IP4_BUCKET_BITS, IP4_OFFSET_BYTES)
+    t6, b6, n6 = _bucketed(ip6, IP6_KEY_BITS, IP6_BUCKET_BITS, IP6_OFFSET_BYTES)
+    header = _HEADER.pack(BUNDLE_MAGIC, BUNDLE_FORMAT, year, month, n4, n6)
+    return header + t4 + t6 + b4 + b6
