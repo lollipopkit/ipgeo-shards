@@ -188,8 +188,24 @@ There is no server. `.github/workflows/update.yml` builds on the 4th of each
 month, verifies the output with a reader that is not the writer, and publishes
 the same three files to Cloudflare Pages and to a GitHub release.
 
-Cloudflare Pages needs `CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID` as
-repository secrets, and a Pages project named `ipgeo-shards`.
+Cloudflare Pages builds the data itself, from this repository:
+
+| | |
+|---|---|
+| build command | `python3 src/build.py --out public` |
+| output directory | `public` |
+| dependencies | none — the build is Python standard library only |
+
+Nothing is uploaded to it from CI. What CI does is *poke* it: Pages triggers
+on push, this repository does not change monthly, and the data comes from
+DB-IP at build time — so left alone it would serve whatever month it was first
+configured on. Put the project's Deploy Hook URL in a `CF_DEPLOY_HOOK`
+repository secret and the monthly run asks it to rebuild. Unset, that step
+says so and does nothing.
+
+Two builders are safe here because the build is byte-reproducible: Cloudflare
+and the release are produced separately from the same month's export and come
+out identical.
 
 DB-IP releases on the first but not always on the first, so the fetch walks
 back up to three months. A month with no release republishes the previous one

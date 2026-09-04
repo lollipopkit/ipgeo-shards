@@ -92,23 +92,32 @@ jobs:
       # than in a workflow of its own — a separate image build would have to
       # fetch the month's export again and might get a different one.
       #
-      # Cloudflare Pages is the primary, and the only reason the published
-      # files are gzipped: its per-asset limit is 25 MiB and the raw IPv6
-      # bundle is 28.9. Uploading pre-compressed also means both copies below
-      # serve identical bytes, and that the download size is a fixed number
-      # the app can put in front of someone before they agree to it.
+      # Cloudflare Pages is the primary, and it builds the data itself from
+      # this repository — so nothing is uploaded from here. What it needs is a
+      # *reason* to rebuild: it triggers on push, the repository does not
+      # change monthly, and the data comes from DB-IP at build time. Left
+      # alone it would serve whatever month it was first configured on.
       #
-      # Gated on `deploy` like the release: a scheduled run publishes, a
-      # manual one only builds unless asked.
-      - name: Publish to Cloudflare Pages
+      # So this pokes it. `CF_DEPLOY_HOOK` is the URL Cloudflare gives for the
+      # project; with it unset the step says so and does nothing, because a
+      # fork has no such project and should not fail for it.
+      #
+      # The build being byte-reproducible is what makes two builders safe:
+      # Cloudflare's copy and the release below are produced separately and
+      # are identical, given the same month's export.
+      - name: Ask Cloudflare Pages to rebuild
         if: >-
           github.event_name == 'schedule' ||
           (github.event_name == 'workflow_dispatch' && inputs.deploy)
-        uses: cloudflare/wrangler-action@da0e0dfe58b7a431659754fdf3f186c529afbe65 # v3
-        with:
-          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          command: pages deploy public --project-name=ipgeo-shards
+        env:
+          HOOK: ${{ secrets.CF_DEPLOY_HOOK }}
+        run: |
+          if [ -z "$HOOK" ]; then
+            echo "::notice::CF_DEPLOY_HOOK is unset — skipping the Pages rebuild"
+            exit 0
+          fi
+          curl -fsS -X POST "$HOOK" -o /dev/null
+          echo "asked Cloudflare Pages to rebuild"
 
       # The second copy, for a network where Cloudflare is unreachable.
       # `releases/latest/download/<file>` is a fixed URL that needs no tag
