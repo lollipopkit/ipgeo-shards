@@ -1,11 +1,16 @@
-"""The two binary formats this repository publishes.
+"""The binary format this repository publishes.
 
-Both are read by ServerBox — the country database by `GeoCountryDb` in
-`lib/core/service/geo_db.dart`, the shards by its shard client. **There are two
-implementations of each format and nothing makes them agree except the test
-vectors in `tests/vectors/`**, which are checked into both repositories. A
-reader tested only against bytes its own writer produced agrees with itself and
-proves nothing.
+One file per address family, read by ServerBox's `GeoBundle`. **There are two
+implementations of it and nothing makes them agree except the test vectors in
+`tests/vectors/`**, which are checked into both repositories. A reader tested
+only against bytes its own writer produced agrees with itself and proves
+nothing.
+
+The country database and the per-/8 shards it used to publish are gone. Both
+existed to keep a *per-lookup* request small: the country table so the app had
+an offline floor, the shards so a lookup disclosed eight bits instead of an
+address. Downloading the whole thing once discloses nothing at all, which
+makes both of them answers to a question no longer asked.
 
 Big-endian throughout, because a format read by a binary search wants a fixed
 stride and no endianness question at the call site.
@@ -70,132 +75,6 @@ IP6_START_BYTES = 6
 #: directly. Gaps therefore have to be representable, or an unallocated block
 #: inherits whichever country happens to precede it.
 NO_COUNTRY = 0xFF
-
-
-@dataclass(frozen=True)
-class CountryRange:
-    start: int
-    """First address in the range, as an integer."""
-
-    code: str | None
-    """ISO 3166-1 alpha-2, or None for a gap."""
-
-
-def build_country_db(
-    coords: dict[str, tuple[float, float]],
-    ip4: list[CountryRange],
-    ip6: list[CountryRange],
-) -> bytes:
-    """The file the app bundles.
-
-    ``coords`` maps a country code to where that country is drawn. ``ip4`` and
-    ``ip6`` are sorted lists of range starts; ``ip6`` keys on the top
-    [IP6_KEY_BITS] bits of the address.
-
-    Layout::
-
-        magic "SBGC"     4 B
-        format           1 B   == 1
-        countryCount     2 B   u16, at most 255
-        country table    countryCount x 6 B: cc[2] + lat i16 + lon i16
-        ip4Count         4 B   u32
-        ip4 records      ip4Count x 5 B: start u32 + countryIdx u8
-        ip6Count         4 B   u32
-        ip6 records      ip6Count x 7 B: start u48 + countryIdx u8
-    """
-    codes = sorted(coords)
-    if len(codes) > NO_COUNTRY:
-        # Loud, and with the fix in the message: the reader refuses a file
-        # claiming more than 255 countries, because the 256th index is the gap
-        # sentinel. Widening `countryIdx` to u16 is format 2, and costs one
-        # byte per record on both sides.
-        raise SystemExit(
-            f"{len(codes)} countries does not fit in a u8 index "
-            f"(max {NO_COUNTRY}). Bump COUNTRY_FORMAT to 2 with a u16 index, "
-            f"in this file and in GeoCountryDb."
-        )
-    index = {code: i for i, code in enumerate(codes)}
-
-    out = bytearray()
-    out += COUNTRY_MAGIC
-    out += struct.pack(">BH", COUNTRY_FORMAT, len(codes))
-    for code in codes:
-        lat, lon = quantise(*coords[code])
-        out += code.encode("ascii") + struct.pack(">hh", lat, lon)
-
-    for ranges, start_bytes in ((ip4, 4), (ip6, IP6_START_BYTES)):
-        out += struct.pack(">I", len(ranges))
-        previous = -1
-        for r in ranges:
-            if r.start <= previous:
-                raise SystemExit(f"country ranges out of order at {r.start}")
-            previous = r.start
-            out += r.start.to_bytes(start_bytes, "big")
-            out += bytes([index[r.code] if r.code else NO_COUNTRY])
-
-    return bytes(out)
-
-
-# --------------------------------------------------------------------------
-# The city shards, fetched on demand
-# --------------------------------------------------------------------------
-
-#: How many leading bits of the address name the shard.
-#:
-#: Eight, so a request discloses the first octet and nothing more. That is the
-#: whole reason this is static files rather than a query API: the limit is a
-#: property of the protocol, not a promise about whoever runs the server.
-#:
-#: IPv6 has no shards at all, and the reason is not this constant — see the
-#: coverage section of the README. No *fixed* depth works there: a range has to
-#: be written into every shard it spans, and IPv6 ranges are wide enough in
-#: prefix space that /8 leaves one shard at 16 MB while /24 needs a million
-#: files. A variable depth does work and is not built.
-IP4_SHARD_BITS = 8
-IP4_KEY_BITS = 32
-IP4_START_BYTES = 3
-IP4_RECORD_BYTES = IP4_START_BYTES + 4
-
-
-@dataclass(frozen=True)
-class ShardRecord:
-    offset: int
-    """Address minus the shard's own first address."""
-
-    lat: int
-    lon: int
-    """Quantised, or (NO_DATA, 0) for a gap."""
-
-
-def build_ip4_shard(records: list[ShardRecord]) -> bytes:
-    """One shard: a sorted array of fixed-width records, and nothing else.
-
-    No header. The stride is in `index.json` for the whole family, so a shard
-    is exactly what a binary search wants — and adding a header would mean
-    every client offsetting past it on every lookup.
-
-    Fixed width rather than a varint delta encoding, which would be about half
-    the bytes: a delta encoding cannot be searched without being walked, and
-    the size comes back at the transport layer anyway. These compress to
-    roughly half over the wire.
-    """
-    if not records:
-        return b""
-    if records[0].offset != 0:
-        # A lookup takes the last record at or below the key, so the first
-        # record has to be at zero or an address below it has no answer at all
-        # — which is a different thing from having no data.
-        raise SystemExit("a shard must start at offset 0")
-
-    out = bytearray()
-    previous = -1
-    for r in records:
-        if r.offset <= previous:
-            raise SystemExit(f"shard records out of order at {r.offset}")
-        previous = r.offset
-        out += r.offset.to_bytes(IP4_START_BYTES, "big")
-        out += struct.pack(">hh", r.lat, r.lon)
-    return bytes(out)
 
 
 # ---------------------------------------------------------------------------

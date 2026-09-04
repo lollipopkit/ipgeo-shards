@@ -1,4 +1,4 @@
-# Rebuilds and publishes the month's data, and the image that serves it.
+# Rebuilds and publishes the month's data.
 #
 # DB-IP releases on the first of each month, but not at midnight and not
 # always on the first — so this runs on the fourth, and the fetch walks back up
@@ -25,10 +25,6 @@ on:
 
 permissions:
   contents: write
-  packages: write
-
-env:
-  IMAGE: ghcr.io/${{ github.repository_owner }}/ipgeo-shards
 
 concurrency:
   group: update
@@ -71,15 +67,8 @@ jobs:
       - name: What was produced
         if: github.event_name != 'pull_request'
         run: |
-          # The shard directory carries the month, so it is read from the
-          # index rather than spelled out — spelling it out is what broke this
-          # step when the month moved into the path.
-          dir=$(python3 -c "import json;print(json.load(open('public/v1/index.json'))['families']['ip4']['dir'])")
           ls -la public
-          echo "country_v1.bin: $(stat -c%s public/country_v1.bin) bytes"
-          echo "shards in $dir: $(ls "public/$dir" | wc -l)"
-          du -sh "public/$dir"
-          head -c 2000 public/v1/index.json
+          cat public/manifest.json
 
       # Checked here rather than trusted, because both are silent when wrong:
       # a client that cannot read the file falls back to a coarser answer, and
@@ -88,13 +77,13 @@ jobs:
         if: github.event_name != 'pull_request'
         run: python3 src/verify.py --out public
 
-      # Read once and reused by the tags and the release below, so the image
-      # and the release can never be labelled with different months.
+      # Read once and reused by both publishing steps, so the two copies can
+      # never be labelled with different months.
       - name: Which month this is
         id: month
         if: github.event_name != 'pull_request'
         run: |
-          month=$(python3 -c "import json;print(json.load(open('public/v1/index.json'))['generated'])")
+          month=$(python3 -c "import json;print(json.load(open('public/manifest.json'))['generated'])")
           echo "month=$month" >> "$GITHUB_OUTPUT"
           echo "built $month"
 
@@ -103,72 +92,29 @@ jobs:
       # than in a workflow of its own — a separate image build would have to
       # fetch the month's export again and might get a different one.
       #
-      # Not gated on `deploy`: the image *is* the endpoint — the host pulls
-      # it — and it costs nothing to publish. The release below is gated
-      # because it is a second copy of 24 MB across 223 assets.
-      - name: Set up QEMU
-        if: github.event_name != 'pull_request'
-        uses: docker/setup-qemu-action@29109295f81e9208d7d86ff1c6c12d2833863392 # v3
-
-      - name: Set up Buildx
-        if: github.event_name != 'pull_request'
-        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4
-
-      - name: Login to ghcr.io
-        if: github.event_name != 'pull_request'
-        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Publish the image
-        if: github.event_name != 'pull_request'
-        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7
-        with:
-          context: .
-          file: Dockerfile
-          # arm64 because that is what the maintainer's host is, and because a
-          # single-arch image would silently not run there.
-          platforms: linux/amd64,linux/arm64
-          push: true
-          tags: |
-            ${{ env.IMAGE }}:${{ steps.month.outputs.month }}
-            ${{ env.IMAGE }}:latest
-          provenance: false
-
-      # There is no deploy step for the primary endpoint. It runs the image
-      # published above, so publishing the image *is* the deploy — the host
-      # pulls it. Nothing here holds a credential to that host, which is the
-      # arrangement worth keeping: a workflow that could reach into the server
-      # would be a workflow worth compromising.
-
-      # The second endpoint. `releases/latest/download/<file>` is a fixed URL
-      # that needs no tag lookup, so a client falling back to it has nothing to
-      # discover first. Same artefacts as the deploy above, from the same run —
-      # two endpoints serving different bytes would be worse than one.
+      # Cloudflare Pages is the primary, and the only reason the published
+      # files are gzipped: its per-asset limit is 25 MiB and the raw IPv6
+      # bundle is 28.9. Uploading pre-compressed also means both copies below
+      # serve identical bytes, and that the download size is a fixed number
+      # the app can put in front of someone before they agree to it.
       #
-      # Each shard is its own asset, not a tarball. A client fetches the one
-      # /8 it needs; an archive would mean downloading 24 MB to read 110 KB,
-      # and would also mean the fallback disclosed *every* octet the user has a
-      # server in rather than one.
-      #
-      # Release asset names cannot contain a slash, so `v1/ip4/008.bin` is
-      # flattened to `ip4-008.bin`. The naming is in the README because a
-      # client has to know it.
-      - name: Stage the release assets
+      # Gated on `deploy` like the release: a scheduled run publishes, a
+      # manual one only builds unless asked.
+      - name: Publish to Cloudflare Pages
         if: >-
           github.event_name == 'schedule' ||
           (github.event_name == 'workflow_dispatch' && inputs.deploy)
-        run: |
-          mkdir -p release
-          cp public/country_v1.bin public/v1/index.json release/
-          dir=$(python3 -c "import json;print(json.load(open('public/v1/index.json'))['families']['ip4']['dir'])")
-          for f in "public/$dir"/*.bin; do
-            cp "$f" "release/ip4-$(basename "$f")"
-          done
-          ls release | wc -l
+        uses: cloudflare/wrangler-action@da0e0dfe58b7a431659754fdf3f186c529afbe65 # v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          command: pages deploy public --project-name=ipgeo-shards
 
+      # The second copy, for a network where Cloudflare is unreachable.
+      # `releases/latest/download/<file>` is a fixed URL that needs no tag
+      # lookup, so a client falling back to it has nothing to discover first —
+      # and it is the same three files from the same run, because two
+      # endpoints serving different bytes would be worse than one.
       - name: Publish a release
         if: >-
           github.event_name == 'schedule' ||
@@ -180,10 +126,13 @@ jobs:
           notes="IP geolocation by DB-IP (https://db-ip.com), used under CC BY 4.0
           (https://creativecommons.org/licenses/by/4.0/).
 
-          Built from dbip-city-lite-$month and dbip-country-lite-$month.
-          Shard \`v1/ip4/NNN.bin\` is published here as \`ip4-NNN.bin\`."
+          Built from dbip-city-lite-$month. City level in both families.
+
+          \`manifest.json\` names the two bundles, their sizes packed and
+          unpacked, and a sha256 for each — read it first, since it is what
+          says how much a client is about to download."
           # Created if it is new, re-uploaded if the month is being rebuilt.
           # `--clobber` rather than deleting the release, so the fixed
           # `latest/download` URLs never point at nothing.
-          gh release create "$month" --title "$month" --notes "$notes" release/* \
-            || gh release upload "$month" --clobber release/*
+          gh release create "$month" --title "$month" --notes "$notes" public/* \
+            || gh release upload "$month" --clobber public/*

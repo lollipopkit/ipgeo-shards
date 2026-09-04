@@ -8,7 +8,7 @@ globe, rebuilt monthly and served as plain files.
 
 There is no server code here. That is the point.
 
-## Why files and not an API
+## Why a download and not an API
 
 The app draws each server where its address is, which means something has to
 turn an address into a coordinate. Every hosted geolocation API answers that
@@ -28,82 +28,54 @@ rate limit and no account.
 
 ## What is published
 
-| Path | What | Size |
-|---|---|---|
-| `country_v1.bin` | One coordinate per country, and a range table over IPv4 and IPv6 | 4.1 MB, ~2 MB compressed |
-| `v1/<month>/ip4/NNN.bin` | City coordinates for `NNN.0.0.0/8` | 221 files, 110 KB mean, 286 KB largest |
-| `v1/index.json` | Which shards exist, and the record layout to read them with | 2 KB |
+Three files, rebuilt monthly:
 
-`country_v1.bin` is **bundled inside the app** rather than fetched. It is the
-floor: it answers offline, on a first run, and for anyone who leaves the shard
-download switched off — so the globe is never empty and nothing has to be
-agreed to before it works. It is refreshed only when the app ships a release.
+| file | packed | unpacked | records |
+|---|---|---|---|
+| `ip4_city_v1.bin.gz` | 13.62 MiB | 23.65 MiB | 3,542,032 |
+| `ip6_city_v1.bin.gz` | 11.48 MiB | 28.90 MiB | 3,755,198 |
+| `manifest.json` | — | — | names both, with sizes and a sha256 each |
 
-The shards are fetched on demand and cached. Downloading them is opt-in and off
-by default.
+City level in both families. Read `manifest.json` first: it is what says how
+much a client is about to download, before it downloads any of it.
 
-Both endpoints serve the same bytes from the same build:
+**Gzipped as published, not by the transport.** Cloudflare refuses an asset
+over 25 MiB and the raw IPv6 bundle is 28.9, so this is what makes it fit at
+all. It also makes the download a fixed number rather than whatever a CDN
+negotiates, which matters because the app puts that number in front of someone
+and asks them to agree to it.
 
-- `https://ipgeo.lollipopkit.com/` — an `ipgeo-shards` container on the
-  maintainer's host, behind Cloudflare's CDN. The same image anyone can run
+Two endpoints, same bytes from the same run:
+
+- `https://ipgeo-shards.pages.dev/` — Cloudflare Pages, the primary
 - `https://github.com/lollipopkit/ipgeo-shards/releases/latest/download/` —
-  the fallback, for a network where the first is unreachable. Release assets
-  cannot contain `/` in a name, so the shards are flattened to `ip4-NNN.bin`.
-
-**The month is in the shard path**, and `v1/index.json` is what names the
-directory — build the path from `families.ip4.dir` rather than assembling it.
-It is there so a shard really is immutable: the data changes monthly, and at a
-stable URL a thirty-day `Cache-Control` would have a CDN serving last month's
-answer for another thirty days. A build carries one month and no more, so last
-month's paths stop existing when this month's deploys.
+  a fixed URL that needs no tag lookup, for a network where the first is
+  unreachable
 
 ## Coverage
 
-Both families are placed at **country level for 100.00% of routable IPv4
-space** — DB-IP's country export leaves exactly 256 addresses as `ZZ` — and
-for effectively all of allocated IPv6. That is what `country_v1.bin` gives
-offline, with nothing asked and nothing downloaded.
+| | covered |
+|---|---|
+| IPv4, city level | **100.00%** of routable space |
+| IPv6, city level | effectively all of allocated space |
 
-The city shards cover **100.00% of routable IPv4** too: no row is dropped for
-a missing coordinate, and none sits on Null Island. "Routable" here means
-everything `isPrivateHost` does not already refuse — 3,702,258,688 addresses,
-86.2% of the 32-bit space.
+"Routable" is what `isPrivateHost` does not refuse — 3,702,258,688 addresses,
+86.2% of the 32-bit space. No row is dropped for a missing coordinate or for
+sitting on Null Island; the ones that are dropped are `ZZ` (DB-IP's own
+"unknown"), which is 256 addresses.
 
-**IPv6 has no city shards.** It is answered at country level and nowhere
-finer. That is a scope decision rather than an impossibility, and it is worth
-writing down which:
+**IPv6 used to be country level only, and the reason was file count.** A fixed
+shard depth could not work: ranges have to be written into every shard they
+span, so /8 left one shard at 16 MB while anything fine enough to cap a shard
+needed 56,768 files at /16 or 1,043,906 at /24 — against Cloudflare's 20,000.
+A variable depth would have fit, at 6,388 files.
 
-A *fixed* shard depth does not work. Ranges have to be written into every
-shard they span, or a lookup lands in an empty file and finds nothing — and
-IPv6 ranges are enormous in prefix space, so the record count grows with the
-depth while the shard size falls:
-
-| Depth | Files | Records | Largest shard |
-|---|---|---|---|
-| /8 | 222 | 4.16 M | 16.6 MB |
-| /16 | 56,768 | 4.22 M | 6.5 MB |
-| /24 | 1,043,906 | 5.20 M | 1.8 MB |
-
-Every depth is bad at one end or the other: /8 and /12 keep the file count
-small and leave one shard at 16 MB, while anything fine enough to cap a shard
-needs 50,000 to a million files against Cloudflare's limit of 20,000.
-
-A *variable* depth does work, and has been measured: split a shard only when
-it would exceed 512 KB, eight bits at a time, and the result is 6,388 files
-totalling 25 MB with none over 509 KB — 8 prefixes staying at /8, 1,268 at
-/16, 3,064 at /24 and 2,048 at /32. The index would carry the depth each
-prefix ended up at. That is a real option and it is not built; the country
-answer is what IPv6 gets for now.
-
-Coarsening the *key* instead is not a way out: /48 removes 3% of the records
-and /40 removes 82% by merging cities that are genuinely different places, at
-which point the answer is country-level anyway.
-
-Merging adjacent ranges is worth about 1% on both families, because DB-IP has
-already merged everything sharing a city. Quantising the coordinates is worth
-little more — going from 1.1 km to 110 km precision removes only 29% of the
-records, since what makes them numerous is how finely the address space is
-carved up rather than how often a coordinate repeats.
+None of that applies to a file that is downloaded whole. The bucket table is
+inside it, there is no file count, and IPv6 costs 11.48 MiB packed. Two dead
+ends are worth keeping written down: coarsening the key past /48 merges
+different cities, and quantising coordinates from 1.1 km to 110 km removes
+only 29% of the records — there are many records because the address space is
+finely divided, not because coordinates repeat.
 
 ## Where a country is drawn
 
@@ -119,53 +91,58 @@ IPv4 addresses each city covers. Not its capital, and not a geometric centroid.
   United States at Columbus rather than Washington. For an app that draws
   *servers*, that is the better answer — servers are in data centres.
 
-## Formats
+## Format
 
-Big-endian throughout. Coordinates are a signed 16-bit fraction of their own
-axis — about 300 m of latitude — so a pair costs four bytes instead of sixteen,
-which is far finer than a city centroid is meaningful to begin with.
+Big-endian throughout, one file per family.
 
-Both formats are a **sorted array with a fixed stride and no header**, so a
-lookup is a binary search straight on the bytes. Fixed width rather than
-varint deltas, which would be about half the size: a delta encoding has to be
-walked to be searched, and the size comes back at the transport layer anyway.
-
-A record covers every address from its start up to the *next* record's start.
-Gaps therefore have to be representable, or an unallocated block silently
-inherits whichever entry precedes it — `0xFF` is the country index that means
-"nothing here", and latitude `-32768` is the shard equivalent.
-
-### `country_v1.bin`
-
-```
-magic "SBGC"     4 B
-format           1 B   == 1
-countryCount     2 B   u16, at most 255 (256 is the gap index)
-country table    countryCount x 6 B: cc[2] + lat i16 + lon i16
-ip4Count         4 B   u32
-ip4 records      ip4Count x 5 B: start u32 + countryIdx u8
-ip6Count         4 B   u32
-ip6 records      ip6Count x 7 B: start u48 + countryIdx u8
+```text
+magic "SBGX"          4 B
+format                1 B   == 1
+family                1 B   == 4 or 6
+year u16, month u8    3 B
+count u32             4 B
+reserved              3 B   zero, padding the header to 16
+bucket table  (2^bucketBits + 1) x u32   record index each bucket begins at
+records       count x (offset + lat i16 + lon i16)
 ```
 
-IPv6 keys on the **top 48 bits**. Measured: /48 leaves 357,607 of DB-IP's
-359,845 IPv6 ranges distinguishable, while /40 collapses 40% of them into a
-different country. 48 bits also fits a signed 64-bit integer without the top
-bit ever being set, which removes a whole class of comparison bug from every
-client — at 64 bits, prefixes in `8000::/1` sort below zero, and nothing routed
-today is up there to make that obvious.
+| | IPv4 | IPv6 |
+|---|---|---|
+| key | the whole address, 32 bits | the leading 48 bits |
+| bucket | top 8 bits | top 16 bits of the key |
+| offset | u24 | u32 |
+| record | 7 B | 8 B |
 
-### `v1/<month>/ip4/NNN.bin`
+A record covers every address from its own key up to the next record's, which
+is what makes the file a sorted array a binary search runs on directly. Gaps
+therefore have to be representable: `lat == -32768` means *nothing is
+allocated here*, and without it an unallocated block would inherit whatever
+precedes it. It is the one value the quantisation cannot produce.
 
-```
-records          n x 7 B: offset u24 + lat i16 + lon i16
-```
+**Every bucket that has any record begins with one at offset 0.** Otherwise an
+address in the low part of a bucket falls below every row and has no answer at
+all — which a client cannot tell from "no data here". A bucket with no records
+at all is the normal way to say a whole /8 or /16 is unallocated; it replaced
+the old index's `present` list.
 
-`offset` is the address minus the shard's own first address. The first record
-is always at offset 0, so no address in the shard is below the table. Read
-`shardBits`, `keyBits`, `startBytes`, `recordBytes` and `dir` out of
-`index.json` rather than hard-coding them — `dir` in particular, since it
-carries the month.
+The family is in the header rather than the filename, so a file renamed or
+cached under the wrong name is refused instead of read with the other stride —
+where every record would decode to something plausible.
+
+`year`/`month` are in the header too, so a client can tell what it is holding
+without being told. That is what lets it decide on its own to replace what it
+has.
+
+Coordinates are a signed 16-bit fraction of their own axis: about 300 m of
+latitude, 600 m of longitude at the equator. Finer than a city centroid, and
+4 bytes instead of 16.
+
+**IPv6 is keyed at /48, measured rather than picked.** 3,898,564 city ranges
+stay distinguishable there against 4,030,857 at /64 — 3% more distinctions for
+8 MB more file. /40 would merge different cities outright. It also keeps every
+prefix positive as a signed 64-bit integer, which `8000::/1` is not at /64;
+a reader's binary search would need unsigned comparisons, and nothing routed
+today would reveal the mistake.
 
 ## Building
 
@@ -181,7 +158,7 @@ python3 -m unittest discover -s tests
 nothing. Its output is deterministic: same inputs, byte-identical files.
 
 `verify.py` is not a formality. A file that is subtly wrong is silent
-everywhere — a client that cannot parse a shard falls back to the country
+everywhere — a client that cannot parse a bundle places nothing
 database, one that reads at the wrong offset draws a server in the wrong city —
 so the output is read back by a parser that is not the writer.
 
@@ -207,45 +184,34 @@ failing.
 
 ## Deploying
 
-CI builds on the 4th of each month and pushes the image to ghcr.io. **That is
-the whole deploy**: the host runs `ghcr.io/lollipopkit/ipgeo-shards:latest`
-and picks the month up with a `docker compose pull`. Nothing in this
-repository holds a credential to that host, which is the arrangement worth
-keeping — a workflow that could reach into the server would be a workflow
-worth compromising.
+There is no server. `.github/workflows/update.yml` builds on the 4th of each
+month, verifies the output with a reader that is not the writer, and publishes
+the same three files to Cloudflare Pages and to a GitHub release.
 
-A GitHub Release goes out in the same run, which is the second endpoint. It
-needs `deploy: true` on a manual run, or the monthly schedule.
+Cloudflare Pages needs `CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID` as
+repository secrets, and a Pages project named `ipgeo-shards`.
 
-A pull request runs the tests and stops there: downloading 90 MB to throw the
-result away is twenty minutes for no answer the tests did not already give.
-
-No secrets. `GITHUB_TOKEN` is what pushes the image and cuts the release.
+DB-IP releases on the first but not always on the first, so the fetch walks
+back up to three months. A month with no release republishes the previous one
+rather than failing.
 
 ## Self-hosting
 
-The files are static, so anyone who would rather not talk to this host can
-serve their own. There is an image:
-
-```sh
-docker run -d -p 8080:8080 ghcr.io/lollipopkit/ipgeo-shards:latest
-```
-
-Alpine and nginx, with the month's data baked in — built by the same CI run
-that produced the data, so the image and the files it serves are never a
-different build. `amd64` and `arm64`. See `deploy/` for a compose file and a
-reverse-proxy example.
-
-Or without Docker:
+The files are static and the build is reproducible, so anyone can serve their
+own copy:
 
 ```sh
 python3 src/build.py --out public
+python3 src/verify.py --out public
 # then put `public/` behind any static file server
 ```
 
-Point the app at it under **Settings → Servers → Globe**. Note that this
-changes who serves the files, not what a request discloses — that is fixed by
-the /8 sharding and is the same wherever the files come from.
+Nothing about the protocol depends on who serves it. A client downloads both
+bundles once and every lookup after that is local, so the server learns that
+someone fetched the data and nothing else — not which addresses were looked
+up, not how many, not when. That is a property of downloading the whole thing
+rather than a promise about the operator, which is why changing the endpoint
+buys nothing: there is nothing to improve.
 
 ## Licence
 
@@ -253,6 +219,6 @@ The code in this repository is MIT; see `LICENSE`.
 
 The **data** is derived from DB-IP's Lite databases and is therefore
 [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/). Anything that
-redistributes `country_v1.bin` or the shards has to carry the attribution
-above — which is why it also appears in `v1/index.json`, in the app's About
+redistributes these files has to carry the attribution above — which is why
+it also appears in `manifest.json`, in the app's About
 page, and in every release's notes.
