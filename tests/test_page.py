@@ -21,7 +21,10 @@ import subprocess
 import unittest
 from pathlib import Path
 
-PAGE = Path(__file__).resolve().parent.parent / "public" / "index.html"
+# `web/`, not `public/`. The latter is what `src/build.py` assembles and is
+# gitignored, so a test pointed there passes on a machine that has built and
+# fails in CI on a fresh checkout — which is exactly what it did.
+PAGE = Path(__file__).resolve().parent.parent / "web" / "index.html"
 
 # The page has no module boundary, so the functions under test are lifted out
 # by name. Brittle on purpose: if one is renamed this fails loudly rather than

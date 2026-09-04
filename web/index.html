@@ -158,7 +158,17 @@ async function lookup(text) {
     const family = idx.families?.ip4;
     if (!family) throw new Error('this endpoint serves no IPv4 shards');
 
-    const shard = k >>> (family.keyBits - family.shardBits);
+    // Arithmetic, not bit shifts. JS `<<` and `>>>` coerce to *32-bit*, and
+    // `192 << 24` overflows to a negative int32 — which made `k - (shard <<
+    // 24)` about 4.3 billion instead of the offset, so the search fell to the
+    // last record of the shard and answered with wherever that happened to
+    // be. Every address in 128.0.0.0/8 and above was wrong, and the four
+    // sample buttons are all below it, which is why it looked fine.
+    //
+    // `2 ** 24` and `%` are exact for anything under 2^53, so the whole class
+    // of bug is gone rather than covered by a test.
+    const span = 2 ** (family.keyBits - family.shardBits);
+    const shard = Math.floor(k / span);
     if (!family.present.includes(shard)) {
       return show(
         `<p class="note">No data for ${shard}.0.0.0/8 — the index does not ` +
@@ -167,7 +177,7 @@ async function lookup(text) {
     }
 
     const bytes = await loadShard(family, shard);
-    const offset = k - (shard << (family.keyBits - family.shardBits));
+    const offset = k % span;
     const at = search(bytes, family, offset);
 
     if (!at) {
