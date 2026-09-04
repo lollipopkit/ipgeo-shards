@@ -235,7 +235,16 @@ IP6_OFFSET_BYTES = (IP6_KEY_BITS - IP6_BUCKET_BITS) // 8  # 4
 IP4_BUNDLE_RECORD = IP4_OFFSET_BYTES + 4
 IP6_BUNDLE_RECORD = IP6_OFFSET_BYTES + 4
 
-_HEADER = struct.Struct(">4sBHBII")
+#: Which address family a bundle holds. In the header rather than inferred
+#: from the filename, so a file that has been renamed or cached under the
+#: wrong name is refused instead of read with the other family's stride.
+FAMILY_IP4 = 4
+FAMILY_IP6 = 6
+
+#: `3x` pads the header to 16 bytes. Without it the header is 13 and the u32
+#: bucket table that follows starts unaligned — legal everywhere, and free to
+#: avoid.
+_HEADER = struct.Struct(">4sBBHBI3x")
 BUNDLE_HEADER_BYTES = _HEADER.size                       # 16
 
 
@@ -301,36 +310,53 @@ def _bucketed(
 
 
 def build_bundle(
-    ip4: list[BundleRecord],
-    ip6: list[BundleRecord],
+    family: int,
+    records: list[BundleRecord],
     year: int,
     month: int,
 ) -> bytes:
-    """Everything ServerBox needs to place an address, in one file.
+    """One address family's city data, in one file.
 
     ```text
     magic "SBGX"          4 B
     format                1 B   == 1
+    family                1 B   == 4 or 6
     year u16, month u8    3 B
-    ip4Count u32          4 B
-    ip6Count u32          4 B
-    ip4 table   257 x u32        record index each /8 begins at
-    ip6 table 65537 x u32        record index each /16 of the /48 key begins at
-    ip4 records ip4Count x 7 B   offset u24 + lat i16 + lon i16
-    ip6 records ip6Count x 8 B   offset u32 + lat i16 + lon i16
+    count u32             4 B
+    reserved              3 B   zero, padding the header to 16
+    bucket table  (2^bucketBits + 1) x u32   record index each bucket begins at
+    records       count x (offset + lat i16 + lon i16)
     ```
 
-    One file rather than 221, because the sharding only ever bought bandwidth:
-    it cost eight bits of disclosure per lookup, and downloading the lot costs
-    none at all. It also removes the index, the `present` set, the per-shard
-    cache, the second endpoint's flattened names and the month in the path —
-    all of which existed to make many files work.
+    Two files rather than one, and **that is Cloudflare's 25 MiB per-asset
+    limit rather than a preference**. The two families together come to 25.51
+    MiB compressed, which is over it; apart they are 13.62 and 11.89. Raw they
+    are 23.65 and 29.74, so the second is over on its own — which is why what
+    is published is gzipped rather than left for the transport to compress.
+    That also makes the download size a fixed number the app can put in front
+    of someone before they agree to it.
 
-    The month is in the header rather than the filename so a reader can tell
-    what it has without being told, which is what makes "replace the old one"
-    a decision the app can take on its own.
+    One file *per family* rather than 221 per family: the sharding only ever
+    bought bandwidth. It cost eight bits of disclosure per lookup, and
+    downloading the family costs none at all — which removes the index, the
+    `present` set, the per-shard cache, the flattened fallback names and the
+    month in the path, all of which existed to make many files work.
+
+    The month is in the header rather than the filename, so a reader can tell
+    what it holds without being told. That is what lets the app decide on its
+    own to replace what it has.
     """
-    t4, b4, n4 = _bucketed(ip4, 32, IP4_BUCKET_BITS, IP4_OFFSET_BYTES)
-    t6, b6, n6 = _bucketed(ip6, IP6_KEY_BITS, IP6_BUCKET_BITS, IP6_OFFSET_BYTES)
-    header = _HEADER.pack(BUNDLE_MAGIC, BUNDLE_FORMAT, year, month, n4, n6)
-    return header + t4 + t6 + b4 + b6
+    if family == FAMILY_IP4:
+        key_bits, bucket_bits, offset_bytes = 32, IP4_BUCKET_BITS, IP4_OFFSET_BYTES
+    elif family == FAMILY_IP6:
+        key_bits, bucket_bits, offset_bytes = (
+            IP6_KEY_BITS,
+            IP6_BUCKET_BITS,
+            IP6_OFFSET_BYTES,
+        )
+    else:
+        raise SystemExit(f"unknown family {family}")
+
+    table, body, count = _bucketed(records, key_bits, bucket_bits, offset_bytes)
+    header = _HEADER.pack(BUNDLE_MAGIC, BUNDLE_FORMAT, family, year, month, count)
+    return header + table + body
