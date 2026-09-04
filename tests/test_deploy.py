@@ -64,6 +64,23 @@ class CacheControl(unittest.TestCase):
         self.assertIn("immutable", _location('~ "^/v1/[0-9]{4}-[0-9]{2}/"'))
         self.assertIn("immutable", _location("= /country_v1.bin"))
 
+    def test_the_page_itself_is_revalidated(self):
+        """The one thing here that must never be served stale.
+
+        The page is the client. A browser holding an old copy reads today's
+        shards with yesterday's code, which is exactly what happened: this
+        block set no `Cache-Control`, browsers applied heuristic freshness off
+        `Last-Modified`, and a fixed reader stayed unfixed in the field.
+        """
+        body = _location("= /")
+        self.assertIn("no-cache", body)
+        self.assertNotIn("immutable", body)
+        # nginx's `add_header` does not merge: a block that sets any of its
+        # own inherits none of the outer level's, so these have to be repeated
+        # here or the page loses CORS and nosniff.
+        self.assertIn("Access-Control-Allow-Origin", body)
+        self.assertIn("X-Content-Type-Options", body)
+
     def test_cors_is_open_everywhere(self):
         # The app is not a browser, but a panel or anything else built on this
         # is. A missing header here is a class of client that cannot use the
