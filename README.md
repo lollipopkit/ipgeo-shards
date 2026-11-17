@@ -16,12 +16,15 @@ question by being *told the address* — so using one would mean sending the lis
 of a user's servers to a third party, and the only protection against that
 would be somebody's promise not to keep it.
 
-Instead the data is split into 256 files by the first octet. The app fetches
-the one file its address falls in and searches it locally. **Whoever serves
-these files learns that some address in a /8 was looked up, and cannot learn
-which** — not because of a policy, but because the full address is never sent.
-Self-hosting is a one-line change (see below) and improves nothing about that
-guarantee, which is how it should be.
+Instead the whole dataset is downloaded once, and every lookup after that is
+local. **Whoever serves it learns that someone installed it, and nothing about
+what was looked up** — not which address, not how many, not when. That is a
+property of having the file rather than a promise about whoever served it, and
+self-hosting improves nothing about it, which is how it should be.
+
+It used to be split into 256 files by the first octet, fetched one at a time.
+That disclosed eight bits of every address looked up, and the whole-bundle
+format above is what replaced it.
 
 The same reasoning is why there is no request log worth keeping, no API key, no
 rate limit and no account.
@@ -186,7 +189,8 @@ failing.
 
 There is no server. `.github/workflows/update.yml` builds on the 4th of each
 month, verifies the output with a reader that is not the writer, and publishes
-the same three files to Cloudflare Pages and to a GitHub release.
+the same three files as a GitHub release, with Cloudflare Pages building its
+own copy from the repository.
 
 Cloudflare Pages builds the data itself, from this repository:
 
@@ -196,12 +200,15 @@ Cloudflare Pages builds the data itself, from this repository:
 | output directory | `public` |
 | dependencies | none — the build is Python standard library only |
 
-Nothing is uploaded to it from CI. What CI does is *poke* it: Pages triggers
-on push, this repository does not change monthly, and the data comes from
-DB-IP at build time — so left alone it would serve whatever month it was first
-configured on. Put the project's Deploy Hook URL in a `CF_DEPLOY_HOOK`
-repository secret and the monthly run asks it to rebuild. Unset, that step
-says so and does nothing.
+Nothing is uploaded to it from CI. What CI does is *nudge* it: Pages
+triggers on push, this repository does not otherwise change monthly, and the
+data comes from DB-IP at build time — so left alone it would serve whatever
+month it was first configured on.
+
+So the monthly run writes `published.json` (the month, and the manifest's
+digest) and pushes it to `main`, which is what Cloudflare deploys. Written only
+when the month or the manifest changed, so a re-run in the same month pushes
+nothing.
 
 Two builders are safe here because the build is byte-reproducible: Cloudflare
 and the release are produced separately from the same month's export and come

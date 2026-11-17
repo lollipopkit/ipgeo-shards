@@ -87,38 +87,6 @@ jobs:
           echo "month=$month" >> "$GITHUB_OUTPUT"
           echo "built $month"
 
-      # The image and the data it serves come out of one run, so they can
-      # never be a different build. That is the reason this is here rather
-      # than in a workflow of its own — a separate image build would have to
-      # fetch the month's export again and might get a different one.
-      #
-      # Cloudflare Pages is the primary, and it builds the data itself from
-      # this repository — so nothing is uploaded from here. What it needs is a
-      # *reason* to rebuild: it triggers on push, the repository does not
-      # change monthly, and the data comes from DB-IP at build time. Left
-      # alone it would serve whatever month it was first configured on.
-      #
-      # So this pokes it. `CF_DEPLOY_HOOK` is the URL Cloudflare gives for the
-      # project; with it unset the step says so and does nothing, because a
-      # fork has no such project and should not fail for it.
-      #
-      # The build being byte-reproducible is what makes two builders safe:
-      # Cloudflare's copy and the release below are produced separately and
-      # are identical, given the same month's export.
-      - name: Ask Cloudflare Pages to rebuild
-        if: >-
-          github.event_name == 'schedule' ||
-          (github.event_name == 'workflow_dispatch' && inputs.deploy)
-        env:
-          HOOK: ${{ secrets.CF_DEPLOY_HOOK }}
-        run: |
-          if [ -z "$HOOK" ]; then
-            echo "::notice::CF_DEPLOY_HOOK is unset — skipping the Pages rebuild"
-            exit 0
-          fi
-          curl -fsS -X POST "$HOOK" -o /dev/null
-          echo "asked Cloudflare Pages to rebuild"
-
       # The second copy, for a network where Cloudflare is unreachable.
       # `releases/latest/download/<file>` is a fixed URL that needs no tag
       # lookup, so a client falling back to it has nothing to discover first —
@@ -145,3 +113,42 @@ jobs:
           # `latest/download` URLs never point at nothing.
           gh release create "$month" --title "$month" --notes "$notes" public/* \
             || gh release upload "$month" --clobber public/*
+
+      # Cloudflare Pages builds the data itself from this repository, and
+      # triggers on push. The repository does not otherwise change monthly and
+      # the data comes from DB-IP at build time, so a push is the only thing
+      # that tells it there is a new month to serve — left alone it would go
+      # on serving whatever month it was first built on.
+      #
+      # A commit rather than the project's Deploy Hook: a hook is a secret
+      # nobody remembers to set, and while it was unset the primary endpoint
+      # fell two months behind the release it is meant to mirror.
+      #
+      # Written only when the month or the manifest changed, so re-running in
+      # one month rebuilds nothing. `published.json` is the record as well as
+      # the trigger: it says which month each endpoint should be serving.
+      #
+      # Two builders are safe here because the build is byte-reproducible:
+      # Cloudflare's copy and the release below are produced separately from
+      # the same month's export and come out identical.
+      - name: Publish the month to Cloudflare Pages
+        if: >-
+          github.event_name == 'schedule' ||
+          (github.event_name == 'workflow_dispatch' && inputs.deploy)
+        run: |
+          sha=$(sha256sum public/manifest.json | cut -d' ' -f1)
+          printf '{\n  "generated": "%s",\n  "manifest_sha256": "%s"\n}\n' \
+            '${{ steps.month.outputs.month }}' "$sha" > published.json
+          git add published.json
+          # The index, not the working tree: on the first run the file is
+          # untracked, and `git diff` says nothing about those.
+          if git diff --cached --quiet; then
+            echo "::notice::published.json already names this build — nothing to push"
+            exit 0
+          fi
+          # The bot, not the maintainer: a push here is the build's own step,
+          # and it must not read as an edit anyone made.
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -m "data: publish ${{ steps.month.outputs.month }}"
+          git push
